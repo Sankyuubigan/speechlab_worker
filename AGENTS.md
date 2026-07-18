@@ -1,5 +1,16 @@
 # AGENTS.md — SpeechLab (Rust + Tauri + Svelte)
 
+## ПРАВИЛО №1 (главное, выше всех остальных)
+**ПЕРЕД КАЖДЫМ изменением кода, правкой параметров или дебагом — ИЩИ
+ДОКУМЕНТАЦИЮ В ИНТЕРНЕТЕ.** Не полагайся на память и не угадывай.
+- Сверяйся с эталонным репозиторием `onnx-asr` (github.com/istupakov/onnx-asr):
+  `preprocessors/gigaam.py`, `src/onnx_asr/models/gigaam.py`, `src/onnx_asr/asr.py`,
+  `src/onnx_asr/preprocessors/numpy_preprocessor.py`, `src/onnx_asr/preprocessors/fbanks.py`.
+- Для API крейтов (ort, symphonia, ndarray) — docs.rs / исходники.
+- Если интернет недоступен для поиска — прочитай уже скачанные эталонные
+  исходники из репозитория и только на их основе вноси правки.
+- Обновляй этот раздел, когда находишь новые авторитетные источники/факты.
+
 ## Назначение проекта
 Десктопное GUI-приложение (Tauri) для распознавания речи (ASR) с русского языка.
 Пользователь перетаскивает в окно `.ogg` (и другие) аудиофайлы, указывает путь к
@@ -85,8 +96,31 @@ Rust-зависимости тянутся через `cargo` (внутри `tau
 
 ## Важные замечания
 - `onnx_asr` (Python) — эталон поведения. Исходники: github.com/istupakov/onnx-asr
-  (`models/gigaam.py`, `asr.py`, `preprocessors/gigaam.py`). При сомнениях в
-  параметрах препроцессинга/декодинга сверяться с ними.
+  (`src/onnx_asr/models/gigaam.py`, `src/onnx_asr/asr.py`,
+  `src/onnx_asr/preprocessors/numpy_preprocessor.py`,
+  `src/onnx_asr/preprocessors/fbanks.py`, `preprocessors/gigaam.py`). При сомнениях
+  в параметрах препроцессинга/декодинга сверяться с ними.
+- **УНИВЕРСАЛЬНОСТЬ:** приложение должно работать с ЛЮБЫМИ STT-моделями gigaam,
+  которые есть в папке (CTC и/или RNNT). Авто-детект файлов в `ModelRunner::load`
+  (CTC если есть `*_ctc*.onnx`, RNNT если есть `*_rnnt_*.onnx`). Оба движка
+  реализованы и проверяются; приоритет — тот, что есть на диске (RNNT при наличии
+  обоих, т.к. он точнее; но CTC проще и надёжнее).
+- **Параметры препроцессинга V3 (ТОЧНО по эталону, не V2!):**
+  `sample_rate=16000`, `n_fft=320` (`16000//50`), `win_length=320`, `hop_length=160`,
+  `n_mels=64`, `f_min=0`, `f_max=8000`. Окно — **Ханна** `np.hanning(win+1)[:-1]`.
+  **НЕТ pre-emphasis** (V3 не использует). Спектр = `|rfft(frame, n_fft)|**2`,
+  мел-банк HTK (`fbanks.py`: `melscale_fbanks`, `mel_scale="htk"`, без нормализации),
+  `log(clip(mel, 1e-9, 1e9))`. Форма выхода `(1, 64, T)`, `T = (N - win)//hop + 1`.
+  (V2 использует `n_fft=400`, `win=400`, `hop=160` и pre-emphasis 0.97 — это ДРУГИЕ
+  параметры, не путать!)
+- **Битый файл `gigaam_v3.onnx`:** в папке модели `D:\nn\models\stt\gigaam-v3`
+  лежит БИТЫЙ файл (14 байт, содержимое `404: Not Found` — скачан ошибочно вместо
+  ONNX). Код НЕ должен молча на него полагаться: либо скачать/сгенерировать
+  настоящий препроцессор, либо (надёжнее) удалить битый и использовать
+  исправленный ручной fallback. Настоящий `gigaam_v3.onnx` в публичном репо НЕ
+  лежит как файл — он генерируется скриптом `preprocessors/build.py` из функции
+  `GigaamPreprocessorV3` (см. `preprocessors/gigaam.py`). Его можно сгенерировать
+  локально (Python + onnxscript) или просто полагаться на точный ручной LogMel V3.
 - Модель ждёт 16kHz mono. Любой вход декодируется, усредняется в моно и при
   необходимости ресемплится (линейно, в `gigaam.rs`, пока без rubato).
 - Гигабайтные модели НЕ коммитить. Только исходники.
@@ -104,11 +138,20 @@ Rust-зависимости тянутся через `cargo` (внутри `tau
    ручного log-mel. Он лежит в репозитории onnx-asr (models/gigaam_v3.onnx) и
    точно совпадает с тем, что ждёт модель. Ручной log-mel — только если файла
    препроцессора нет и договорились с пользователем.
-4. **Уточнять у пользователя CTC vs RNNT.** В папке модели
-   `D:\nn\models\stt\gigaam-v3` лежит `v3_e2e_ctc.int8.onnx` (CTC, файл есть,
-   декод простой) — приоритетный. RNNT (`gigaam-v3-e2e-rnnt`) сложнее и файла
-   может не быть. CTC: greedy argmax по времени + схлопывание повторов +
-   удаление blank (`<blk>`), `\u2581` → пробел.
+   ВНИМАНИЕ: в папке модели сейчас лежит БИТЫЙ `gigaam_v3.onnx` (14 байт,
+   `404: Not Found`). Код должен либо сгенерировать/заменить его настоящим, либо
+   при обнаружении невалидного ONNX — падать с понятной ошибкой, а не молча
+   выдавать пустой текст. Надёжнее: удалить битый файл и полагаться на исправленный
+   ручной LogMel V3 (параметры — см. «Важные замечания», V3).
+4. **Универсальная поддержка CTC и RNNT.** Оба движка реализованы и авто-выбираются
+   по наличию файлов. CTC: greedy argmax по времени + схлопывание повторов +
+   удаление blank (`<blk>`), `\u2581` → пробел. RNNT: transducer greedy-декодинг
+   по эталону `src/onnx_asr/asr.py` (`_AsrWithTransducerDecoding._decoding`):
+   encoder→decoder(joiner), на каждом шаге argmax; если не blank — эмитим токен и
+   обновляем состояние; шаг t += 1 при blank ИЛИ при достижении `max_tokens_per_step`
+   (для gigaam = 3). Входы/выходы RNNT: encoder `audio_signal`(B×64×T)+`length`,
+   выход `encoded`+`encoded_len`; decoder `x`(1×1)+`h.1`(1×1×320)+`c.1`→`dec`+`h`+`c`;
+   joiner `enc`+`dec`→`joint`.
 5. **Препроцессинг-ONNX (`gigaam_v3.onnx`) берёт на вход WAV 16k mono float и
    выдаёт `features` (1 x 64 x T).** Пайплайн Rust:
    decode(ogg/...) → resample→16k mono → `gigaam_v3.onnx`(features) →
@@ -120,8 +163,15 @@ Rust-зависимости тянутся через `cargo` (внутри `tau
 
 ## Эталонные ссылки
 - Препроцессор (исходник): https://github.com/istupakov/onnx-asr/blob/main/preprocessors/gigaam.py
-- Папка моделей репозитория: https://github.com/istupakov/onnx-asr/tree/main/models
-- Прямая ссылка на веса препроцессора: https://raw.githubusercontent.com/istupakov/onnx-asr/main/models/gigaam_v3.onnx
+- NumPy-препроцессор (эталон точных вычислений): https://github.com/istupakov/onnx-asr/blob/main/src/onnx_asr/preprocessors/numpy_preprocessor.py
+- Мел-банк (HTK, формула): https://github.com/istupakov/onnx-asr/blob/main/src/onnx_asr/preprocessors/fbanks.py
+- Модель gigaam (входы/выходы CTC и RNNT): https://github.com/istupakov/onnx-asr/blob/main/src/onnx_asr/models/gigaam.py
+- Базовый ASR + декодинг (CTC и transducer): https://github.com/istupakov/onnx-asr/blob/main/src/onnx_asr/asr.py
+- Сборка препроцессоров: https://github.com/istupakov/onnx-asr/blob/main/preprocessors/build.py
+- Папка моделей репозитория: https://github.com/istupakov/onnx-asr/tree/main/src/onnx_asr/models
 - Рабочий Python-скрипт пользователя (эталон): `load_model("gigaam-v3-e2e-rnnt")`
   + `.with_vad(silero)` + конвертация ogg→wav через soundfile. Мы делаем CTC-аналог
   без VAD (fallback по длине), т.к. silero.onnx у пользователя нет.
+- ПРОВЕРЕНО (2026-07-19): файл `gigaam_v3.onnx` в публичном репо НЕ лежит как готовый
+  бинарник — он только генерируется скриптом `preprocessors/build.py`. Поэтому
+  полагаться на ручной LogMel V3 (см. «Важные замечания») — корректно и надёжно.

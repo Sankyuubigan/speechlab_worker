@@ -103,6 +103,7 @@
         // Добавляем результат в единое поле (интерфейс сам обновится)
         combinedResult += `=== ${filename} ===\n${text}\n\n`;
         currentProgress = i + 1;
+        if (text === '[ОТМЕНЕНО]') break;
       }
       
       status = 'готово';
@@ -110,6 +111,15 @@
       status = 'ошибка: ' + String(e);
     } finally {
       busy = false;
+    }
+  }
+
+  async function stopRecognition() {
+    try {
+      await invoke('cancel');
+      status = 'останавливаю...';
+    } catch (e) {
+      status = 'ошибка отмены: ' + String(e);
     }
   }
 
@@ -220,6 +230,9 @@
       <button class="primary" onclick={recognize} disabled={busy || dropFiles.length === 0}>
         распознать
       </button>
+      <button class="stop" onclick={stopRecognition} disabled={!busy}>
+        остановить
+      </button>
       <span class="status">{status}</span>
     </div>
 
@@ -269,6 +282,8 @@
   button:disabled { opacity: 0.5; cursor: default; }
   button.primary { background: #89b4fa; color: #1e1e2e; font-weight: 600; }
   button.primary:hover:not(:disabled) { background: #74a0f0; }
+  button.stop { background: #f38ba8; color: #1e1e2e; font-weight: 600; }
+  button.stop:hover:not(:disabled) { background: #f07193; }
   
   .dropzone { border: 2px dashed #585b70; border-radius: 10px; padding: 28px; text-align: center; transition: 0.15s; outline: none; margin-bottom: 18px; }
   .dropzone.over { border-color: #89b4fa; background: #313244; }

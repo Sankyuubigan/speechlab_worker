@@ -73,25 +73,19 @@ async function main() {
         console.log('  ✅ Сборка успешна.');
 
         console.log('\n========================================');
-        console.log('[4/5] Тест декодирования + препроцессинга на реальном ogg...');
+        console.log('[4/5] Тест декодирования + препроцессинга + распознавания на реальном ogg...');
         if (fs.existsSync(TEST_OGG)) {
             console.log(`Тестовый файл: ${TEST_OGG}`);
-            await runCommand('cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', 'ogg_decode', '--', '--nocapture'], { cwd: path.join(scriptDir, 'src-tauri') });
+            await runCommand('cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', 'ogg_decode', '--', '--nocapture']);
+            await runCommand('cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', 'asr::', '--', '--nocapture']);
         } else {
             console.warn(`⚠️ Тестовый файл ${TEST_OGG} не найден — пропускаем тест.`);
         }
 
         console.log('\n========================================');
-        console.log('[5/5] Запуск приложения...');
-        console.log('🚀 Запуск SpeechLab (без консоли)...');
-        const child = spawn(exePath, [], {
-            detached: true,
-            stdio: 'ignore',
-            windowsHide: true
-        });
-        child.unref();
-        console.log('✅ Приложение запущено! Консоль закроется через 1.5с.');
-        setTimeout(() => process.exit(0), 1500);
+        console.log('[5/5] Запуск приложения пропущен (финальная проверка тестов)...');
+        console.log('✅ Тесты завершены.');
+        process.exit(0);
 
     } catch (e) {
         console.error('\n========================================');

@@ -1,6 +1,7 @@
 mod modules;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
 
@@ -9,6 +10,7 @@ use modules::asr::gigaam::ModelRunner;
 pub struct AppState {
     pub model: Mutex<Option<Arc<ModelRunner>>>,
     pub model_dir: Mutex<String>,
+    pub cancel: Arc<AtomicBool>,
 }
 
 fn emit_log(app: &AppHandle, msg: &str) {
@@ -58,18 +60,27 @@ async fn load_model(app: AppHandle, state: State<'_, AppState>) -> Result<String
     Ok(format!("модель успешно загружена из {dir}"))
 }
 
+    #[tauri::command]
+    async fn cancel(state: State<'_, AppState>) -> Result<(), String> {
+        state.cancel.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
 #[tauri::command]
 async fn recognize(app: AppHandle, state: State<'_, AppState>, paths: Vec<String>) -> Result<Vec<String>, String> {
+    // Сбрасываем флаг отмены перед началом новой задачи
+    state.cancel.store(false, Ordering::Relaxed);
+
     // 1. Получаем или загружаем модель
     let arc_model = {
         let mut guard = state.model.lock().await;
         if guard.is_none() {
             emit_log(&app, "Модель не загружена. Загружаю автоматически перед распознаванием...");
             let dir = state.model_dir.lock().await.clone();
-            
+
             let dir_clone = dir.clone();
             let app_clone = app.clone();
-            
+
             let model = tokio::task::spawn_blocking(move || {
                 ModelRunner::load(&dir_clone)
             })
@@ -79,32 +90,49 @@ async fn recognize(app: AppHandle, state: State<'_, AppState>, paths: Vec<String
                 emit_log(&app_clone, &format!("ОШИБКА автозагрузки модели: {}", e));
                 e.to_string()
             })?;
-            
+
+            emit_log(&app, &format!("Автозагрузка модели завершена. Движок: {}", model.engine_name()));
             *guard = Some(Arc::new(model));
-            emit_log(&app, "Автозагрузка модели завершена.");
         }
         guard.as_ref().unwrap().clone()
     };
 
     let mut results = Vec::with_capacity(paths.len());
+    let cancel = state.cancel.clone();
 
-    // 2. Распознаем файлы (можно запускать параллельно, но пока делаем последовательно)
+    // 2. Распознаем файлы
     for p in paths {
+        if cancel.load(Ordering::Relaxed) {
+            emit_log(&app, "⛔ Распознавание отменено пользователем.");
+            results.push("[ОТМЕНЕНО]".to_string());
+            continue;
+        }
         emit_log(&app, &format!("--- Распознаю файл: {} ---", p));
-        
+
         let p_clone = p.clone();
         let model = arc_model.clone();
-        
-        // Само распознавание — это долгий синхронный процесс (ONNX inference)
+        let cancel_clone = cancel.clone();
+
+        // Само распознавание — долгий синхронный процесс (ONNX inference)
         let res = tokio::task::spawn_blocking(move || {
-            model.recognize_file(&p_clone)
+            model.recognize_file(&p_clone, &cancel_clone)
         })
         .await
         .map_err(|e| e.to_string())?;
 
+        if cancel.load(Ordering::Relaxed) {
+            emit_log(&app, "⛔ Распознавание отменено пользователем.");
+            results.push("[ОТМЕНЕНО]".to_string());
+            continue;
+        }
+
         match res {
             Ok(text) => {
-                emit_log(&app, &format!("УСПЕХ ({}): {}", p, text));
+                if text.is_empty() {
+                    emit_log(&app, &format!("ПУСТО ({}): модель не вернула текст — проверь аудио/препроцессор", p));
+                } else {
+                    emit_log(&app, &format!("УСПЕХ ({}): {}", p, text));
+                }
                 results.push(text);
             }
             Err(e) => {
@@ -126,11 +154,13 @@ pub fn run() {
         .manage(AppState {
             model: Mutex::new(None),
             model_dir: Mutex::new(String::new()),
+            cancel: Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![
             set_model_dir,
             load_model,
-            recognize
+            recognize,
+            cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
