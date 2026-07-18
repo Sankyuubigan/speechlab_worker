@@ -1,0 +1,27 @@
+{
+  "name": "speechlab",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@tauri-apps/cli": "2.0.0",
+    "@tsconfig/svelte": "^5.0.4",
+    "@types/node": "^22.0.0",
+    "svelte": "^5.0.0",
+    "svelte-check": "^4.0.0",
+    "typescript": "~5.6.2",
+    "vite": "^5.4.11"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.0.0",
+    "@tauri-apps/plugin-dialog": "2.0.0"
+  }
+}
