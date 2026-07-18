@@ -48,10 +48,12 @@ pub fn decode_opus(path: &str) -> Result<(usize, u32, Vec<f32>)> {
             continue;
         }
 
-        let mut pcm = vec![0.0f32; 576 * channels as usize * 2];
+        // Максимально возможный пакет Opus — 120 мс, что при 48kHz составляет 5760 семплов на канал.
+        let mut pcm = vec![0.0f32; 5760 * channels as usize];
         let n = decoder
             .decode_float(&packet.data, &mut pcm, false)
             .map_err(|e| anyhow::anyhow!("ошибка декода opus: {e}"))?;
+        
         let total = n * channels as usize;
         for i in 0..total {
             samples.push(pcm[i]);

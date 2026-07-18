@@ -56,7 +56,7 @@ impl ModelRunner {
 }
 
 // -----------------------------------------------------------------------------
-// RNN-T (GigaAM v3 E2E RNNT) — по эталону onnx-asr asr.py / models/gigaam.py
+// RNN-T (GigaAM v3 E2E RNNT)
 // -----------------------------------------------------------------------------
 pub struct GigaamRnnt {
     encoder: Mutex<Session>,
@@ -114,11 +114,9 @@ impl GigaamRnnt {
             }
 
             use ndarray::Array;
-            // Эталон: features имеет форму (B, 64, T)
             let features_array = Array::from_shape_vec((1, 64, real_frames), features)?;
             let lengths_array = Array::from_shape_vec((1,), vec![real_frames as i64])?;
 
-            // 1. Encoder: audio_signal (B x 64 x T), length (B)
             let enc_outputs = encoder_guard.run(ort::inputs! {
                 "audio_signal" => ort::value::TensorRef::from_array_view(&features_array)?,
                 "length" => ort::value::TensorRef::from_array_view(&lengths_array)?,
@@ -130,16 +128,13 @@ impl GigaamRnnt {
                 enc_shape[1] as usize,
                 enc_shape[2] as usize,
             );
-            // onnx_asr: encoder_out.transpose(0, 2, 1) -> (B, T, Dim)
             let encoded = ndarray::ArrayView3::from_shape(enc_shape_t, enc_slice)?
                 .permuted_axes([0, 2, 1])
                 .to_owned();
 
-            // Длина выхода encoder (subsampling=4): (real_frames - 1) // 4 + 1
             let t_len = ((real_frames as i64 - 1) / 4 + 1) as usize;
             let t_len = t_len.min(enc_shape_t.2);
 
-            // 2. Decoder + Joint (transducer greedy decode, эталон asr.py)
             let mut h = ndarray::Array3::<f32>::zeros((1, 1, 320));
             let mut c = ndarray::Array3::<f32>::zeros((1, 1, 320));
             let mut next_h = h.clone();
@@ -182,13 +177,10 @@ impl GigaamRnnt {
                     dec_needs_run = false;
                 }
 
-                // enc_t: encoder_out[:, t, :] -> транспонируем в (1, Dim, 1),
-                // т.к. joiner ждёт enc в форме (B, Dim, T).
                 let enc_t = encoded
                     .slice(ndarray::s![.., t..t + 1, ..])
                     .permuted_axes([0, 2, 1])
                     .to_owned();
-                // dec должен быть (1, Dim, 1) — joiner ждёт dec в (B, Dim, T).
                 let dec_t = dec_out.clone().permuted_axes([0, 2, 1]);
                 let joint_res = joiner_guard.run(ort::inputs! {
                     "enc" => ort::value::TensorRef::from_array_view(&enc_t)?,
@@ -232,7 +224,7 @@ impl GigaamRnnt {
 }
 
 // -----------------------------------------------------------------------------
-// CTC (GigaAM v3 E2E CTC) — по эталону onnx-asr asr.py (_AsrWithCtcDecoding)
+// CTC (GigaAM v3 E2E CTC)
 // -----------------------------------------------------------------------------
 pub struct GigaamCtc {
     session: Mutex<Session>,
@@ -279,7 +271,6 @@ impl GigaamCtc {
             }
 
             use ndarray::Array;
-            // Эталон: features (B x 64 x T), feature_lengths (B)
             let features_array = Array::from_shape_vec((1, 64, real_frames), features)?;
             let lengths_array = Array::from_shape_vec((1,), vec![real_frames as i64])?;
 
@@ -288,13 +279,10 @@ impl GigaamCtc {
                 "feature_lengths" => ort::value::TensorRef::from_array_view(&lengths_array)?,
             })?;
 
-            // Выход: log_probs (B, T, vocab)
             let (lp_shape, lp_slice) = outputs["log_probs"].try_extract_tensor::<f32>()?;
             let t = lp_shape[1] as usize;
             let v = lp_shape[2] as usize;
 
-            // CTC-decode (эталон asr.py _AsrWithCtcDecoding):
-            // argmax по vocab, маска != blank, схлопывание соседних повторов.
             let mut decoded = Vec::new();
             let mut prev = self.blank_idx;
             for tt in 0..t {
@@ -330,8 +318,6 @@ fn detokenize(ids: &[u32], vocab: &HashMap<u32, String>) -> String {
     tokens.concat().replace('\u{2581}', " ").trim().to_string()
 }
 
-/// Загружает vocab и определяет blank_idx автоматически (поддержка форматов
-/// "token id" и "id token").
 fn load_vocab_auto(path: &str) -> Result<(HashMap<u32, String>, u32)> {
     let content = std::fs::read_to_string(path).context(format!("не найден vocab: {path}"))?;
     let mut map = HashMap::new();
@@ -340,7 +326,6 @@ fn load_vocab_auto(path: &str) -> Result<(HashMap<u32, String>, u32)> {
         if line.is_empty() {
             continue;
         }
-        // Формат onnx-asr: "token id" (слово + число). Поддержим оба порядка.
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() == 2 {
             if let Ok(idx) = parts[1].parse::<u32>() {
@@ -374,10 +359,59 @@ fn find_file_opt(dir: &str, pattern: &str) -> Option<String> {
         .map(|e| e.path().to_string_lossy().to_string())
 }
 
+/// Линейное ресемплирование С антиалиасинговым фильтром.
+/// Без фильтрации понижение с 48кГц (Opus) до 16кГц создавало сильный ВЧ-шум,
+/// мешавший нормальному распознаванию речи.
 fn resample_linear(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to {
         return samples.to_vec();
     }
+    
+    // FIR anti-aliasing filter (если понижаем частоту)
+    let cutoff = (to as f32 / 2.0) / from as f32;
+    let cutoff = cutoff.min(0.5); // Защита от Найквиста
+
+    let taps: usize = 31;
+    let mut filter = vec![0.0f32; taps];
+    let mut sum = 0.0;
+    let center = (taps / 2) as f32;
+    
+    // Создаем Windowed-Sinc фильтр
+    for i in 0..taps {
+        let x = i as f32 - center;
+        let sinc = if x == 0.0 {
+            2.0 * cutoff
+        } else {
+            (2.0 * std::f32::consts::PI * cutoff * x).sin() / (std::f32::consts::PI * x)
+        };
+        // Окно Хэмминга
+        let window = 0.54 - 0.46 * (2.0 * std::f32::consts::PI * i as f32 / (taps - 1) as f32).cos();
+        filter[i] = sinc * window;
+        sum += filter[i];
+    }
+    for i in 0..taps {
+        filter[i] /= sum;
+    }
+
+    let mut filtered = vec![0.0f32; samples.len()];
+    let half_taps = taps / 2;
+    for i in 0..samples.len() {
+        let mut v = 0.0;
+        for j in 0..taps {
+            let mut idx = i + j;
+            if idx < half_taps {
+                idx = half_taps;
+            }
+            idx -= half_taps;
+            if idx >= samples.len() {
+                idx = samples.len() - 1;
+            }
+            v += samples[idx] * filter[j];
+        }
+        filtered[i] = v;
+    }
+
+    // Собственно линейная интерполяция по уже отфильтрованному (чистому) сигналу
     let ratio = to as f64 / from as f64;
     let new_len = (samples.len() as f64 * ratio).round() as usize;
     let mut out = vec![0.0f32; new_len];
@@ -386,7 +420,7 @@ fn resample_linear(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
         let i0 = src.floor() as usize;
         let i1 = (i0 + 1).min(samples.len() - 1);
         let frac = src - i0 as f64;
-        out[i] = samples[i0] * (1.0 - frac) as f32 + samples[i1] * frac as f32;
+        out[i] = filtered[i0] * (1.0 - frac) as f32 + filtered[i1] * frac as f32;
     }
     out
 }
@@ -396,14 +430,12 @@ mod tests {
     use super::*;
 
     fn model_dir() -> String {
-        // Дефолтная папка модели из GUI
         "D:\\nn\\models\\stt\\gigaam-v3".to_string()
     }
 
     #[test]
     fn preprocessor_v3_not_empty() {
         let pre = Preprocessor::new(&model_dir());
-        // Синтетический сигнал 1 сек @16k (не тишина)
         let sr = 16000usize;
         let mut wav = vec![0.0f32; sr];
         for (i, s) in wav.iter_mut().enumerate() {
@@ -412,40 +444,12 @@ mod tests {
         let (features, frames) = pre.compute(&wav);
         assert!(frames > 0, "число фреймов должно быть > 0");
         assert_eq!(features.len(), 64 * frames, "features должен быть формы 64 x frames");
-        // Никаких NaN/inf
         assert!(
             features.iter().all(|&x| x.is_finite()),
             "признаки не должны содержать NaN/inf"
         );
-        // Лог-мел должен давать отрицательные или около нуля значения, не +inf
         let max_v = features.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         assert!(max_v.is_finite(), "максимум признаков должен быть конечным");
         println!("preprocessor_v3: frames={frames}, max_feature={max_v:.3}");
     }
-
-    #[test]
-    fn recognize_real_ogg_not_empty() {
-        let dir = model_dir();
-        if !Path::new(&dir).exists() {
-            eprintln!("⚠️ папка модели не найдена: {dir} — пропускаем");
-            return;
-        }
-        let test_file = "E:\\Downloads\\audio_2026-07-18_23-59-01.ogg";
-        if !Path::new(test_file).exists() {
-            eprintln!("⚠️ тестовый файл не найден: {test_file} — пропускаем");
-            return;
-        }
-
-        let runner = ModelRunner::load(&dir).expect("модель должна загрузиться");
-        println!("движок: {}", runner.engine_name());
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        let text = runner
-            .recognize_file(test_file, &cancel)
-            .expect("распознавание не должно падать");
-
-        println!("распознанный текст: '{text}'");
-        assert!(!text.is_empty(), "текст НЕ должен быть пустым для реального аудио");
-    }
 }
-

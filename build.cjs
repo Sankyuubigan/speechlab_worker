@@ -83,9 +83,16 @@ async function main() {
         }
 
         console.log('\n========================================');
-        console.log('[5/5] Запуск приложения пропущен (финальная проверка тестов)...');
-        console.log('✅ Тесты завершены.');
-        process.exit(0);
+        console.log('[5/5] Запуск приложения...');
+        console.log('🚀 Запуск SpeechLab (без консоли)...');
+        const child = spawn(exePath, [], {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true
+        });
+        child.unref();
+        console.log('✅ Приложение запущено! Консоль закроется через 1.5с.');
+        setTimeout(() => process.exit(0), 1500);
 
     } catch (e) {
         console.error('\n========================================');
