@@ -7,6 +7,15 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# TTS/ASR debug artifacts (do not write to repo root)
+tts_*.txt
+tts_*.wav
+tts_*.err
+asr_test*.log
+decode_test.log
+test_run.log
+build_run.log
+
 node_modules
 dist
 dist-ssr
@@ -26,3 +35,4 @@ dist-ssr
 /src-tauri/target
 /src-tauri/gen
 /package-lock.json
+/tasks
