@@ -292,24 +292,60 @@ struct GhAsset {
     browser_download_url: String,
 }
 
-fn classify_backend(name: &str) -> Option<(String, String)> {
+/// Превращает имя ассета (`crispasr-windows-x86_64-cuda-non-cuda.zip`) в уникальный
+/// `slug` (`cuda-non-cuda`), отрезая префикс `crispasr[-windows-x86_64]-` и суффикс `.zip`.
+fn asset_slug(name: &str) -> Option<String> {
     let n = name.to_ascii_lowercase();
     if !n.contains("windows") || !n.ends_with(".zip") {
         return None;
     }
-    if n.contains("cpu-legacy") {
-        Some(("cpu-legacy".into(), "CPU (legacy SSE2)".into()))
-    } else if n.contains("cuda") {
-        Some(("cuda".into(), "NVIDIA CUDA (GPU)".into()))
-    } else if n.contains("rocm") || n.contains("hip") {
-        Some(("rocm".into(), "AMD ROCm (GPU)".into()))
-    } else if n.contains("vulkan") {
-        Some(("vulkan".into(), "Vulkan (GPU)".into()))
-    } else if n.contains("cpu") {
-        Some(("cpu".into(), "CPU (AVX2)".into()))
-    } else {
+    let stripped = n
+        .strip_prefix("crispasr-windows-x86_64-")
+        .or_else(|| n.strip_prefix("crispasr-"))
+        .unwrap_or(&n)
+        .strip_suffix(".zip")
+        .unwrap_or(&n);
+    let slug = stripped.trim_matches('-').to_string();
+    if slug.is_empty() {
         None
+    } else {
+        Some(slug)
     }
+}
+
+/// Классифицирует Windows-ассет движка. Возвращает `(id, label)`.
+///
+/// `id` — уникальный slug ассета (используется как имя папки и ключ бэкенда),
+/// поэтому два разных CUDA-билда (`cuda` и `cuda-non-cuda`) НЕ сливаются в один пункт.
+/// `label` — человекочитаемая подпись; если у одной категории несколько вариантов,
+/// к ней дописывается различающий суффикс в скобках (напр. `NVIDIA CUDA (GPU) [non-cuda]`).
+fn classify_backend(name: &str) -> Option<(String, String)> {
+    let slug = asset_slug(name)?;
+
+    let (cat, detail) = if slug.starts_with("cpu-legacy") {
+        ("CPU (legacy SSE2)", slug.strip_prefix("cpu-legacy").unwrap_or(""))
+    } else if slug.starts_with("cpu") {
+        ("CPU (AVX2)", slug.strip_prefix("cpu").unwrap_or(""))
+    } else if slug.contains("cuda") {
+        ("NVIDIA CUDA (GPU)", slug.strip_prefix("cuda").unwrap_or(""))
+    } else if slug.contains("rocm") || slug.contains("hip") {
+        (
+            "AMD ROCm (GPU)",
+            slug.strip_prefix("rocm").or_else(|| slug.strip_prefix("hip")).unwrap_or(""),
+        )
+    } else if slug.contains("vulkan") {
+        ("Vulkan (GPU)", slug.strip_prefix("vulkan").unwrap_or(""))
+    } else {
+        return None;
+    };
+
+    let detail = detail.trim_matches('-');
+    let label = if detail.is_empty() {
+        cat.to_string()
+    } else {
+        format!("{cat} [{detail}]")
+    };
+    Some((slug, label))
 }
 
 /// Запрашивает GitHub и возвращает список доступных Windows-бинарей движка.
@@ -364,14 +400,28 @@ pub fn default_models_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("tts_models"))
 }
 
-/// Резолвит путь к exe движка для выбранного бэкенда: `<engine_dir>/<backend>/crispasr.exe`.
+/// Резолвит путь к exe движка для выбранного бэкенда.
+///
+/// Zip движка может распаковываться как сразу в `<engine_dir>/<backend>/crispasr.exe`,
+/// так и в подпапку внутри (`.../crispasr-windows-x86_64-cuda-non-cuda/crispasr.exe`).
+/// Поэтому сначала проверяем плоский путь, затем рекурсивно ищем `crispasr.exe` в папке
+/// бэкенда (см. `find_exe`). Если ничего не нашли — возвращаем плоский путь для понятной
+/// ошибки «движок не найден по пути: ...».
 pub fn resolve_engine_exe(engine_dir: &str, backend_id: &str) -> PathBuf {
     let base: PathBuf = if engine_dir.is_empty() {
         default_engine_dir()
     } else {
         PathBuf::from(engine_dir)
     };
-    base.join(backend_id).join("crispasr.exe")
+    let folder = base.join(backend_id);
+    let direct = folder.join("crispasr.exe");
+    if direct.exists() {
+        return direct;
+    }
+    if let Some(found) = find_exe(&folder) {
+        return found;
+    }
+    direct
 }
 
 /// Возвращает сохранённую версию установленного бэкенда (из `version.txt`), если есть.

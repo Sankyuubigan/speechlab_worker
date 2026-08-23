@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter};
 
 pub mod download;
 pub mod settings;
+pub mod voices;
 
 use download::preset_by_id;
 

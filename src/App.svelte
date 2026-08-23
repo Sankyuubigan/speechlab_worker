@@ -24,6 +24,14 @@
   let ttsEngineBackend = $state('cpu');
   let ttsPreset = $state('qwen3-tts');
   let ttsVoice = $state('');          // имя спикера (named) или путь к WAV (clone)
+  let ttsStoredVoiceId = $state('');  // id сохранённого голоса из хранилища, '' = свой WAV
+  let ttsVoices = $state<{ id: string; name: string; path: string; ref_text: string; has_avatar: boolean; created_at: string }[]>([]);
+  let showAddVoice = $state(false);
+  let newVoiceName = $state('');
+  let newVoiceAudio = $state('');
+  let newVoiceText = $state('');
+  let newVoiceAvatar = $state('');
+  let addVoiceBusy = $state(false);
   let ttsInstruct = $state('');
   let ttsSpeed = $state(1.0);
   let ttsText = $state('Привет, это тест синтеза речи.');
@@ -72,6 +80,46 @@
     try {
       installedModels = await invoke('tts_list_models', { modelsDir: ttsModelsDir });
     } catch { installedModels = []; }
+  }
+
+  async function refreshVoices() {
+    if (!ttsModelsDir) { ttsVoices = []; return; }
+    try {
+      ttsVoices = await invoke('tts_list_voices', { modelsDir: ttsModelsDir });
+    } catch { ttsVoices = []; }
+  }
+
+  async function pickVoiceAudioForLib() {
+    const picked = await open({ filters: [{ name: 'Audio', extensions: ['wav', 'mp3', 'ogg', 'flac', 'm4a', 'opus'] }] });
+    if (picked && typeof picked === 'string') newVoiceAudio = picked;
+  }
+  async function pickVoiceAvatarForLib() {
+    const picked = await open({ filters: [{ name: 'Image', extensions: ['jpg', 'jpeg', 'png', 'webp'] }] });
+    if (picked && typeof picked === 'string') newVoiceAvatar = picked;
+  }
+  async function submitAddVoice() {
+    if (!newVoiceName.trim() || !newVoiceAudio) { ttsStatus = 'заполните имя и аудио'; return; }
+    addVoiceBusy = true;
+    try {
+      const v = await invoke<{ id: string; path: string }>('tts_add_voice', {
+        modelsDir: ttsModelsDir, name: newVoiceName, srcAudio: newVoiceAudio,
+        refText: newVoiceText, avatar: newVoiceAvatar,
+      });
+      ttsStatus = 'голос добавлен';
+      showAddVoice = false;
+      newVoiceName = ''; newVoiceAudio = ''; newVoiceText = ''; newVoiceAvatar = '';
+      await refreshVoices();
+      ttsStoredVoiceId = v.id;
+      ttsVoice = v.path;
+    } catch (e) { ttsStatus = 'ошибка: ' + String(e); }
+    finally { addVoiceBusy = false; }
+  }
+  async function deleteVoice(id: string) {
+    try {
+      await invoke('tts_delete_voice', { modelsDir: ttsModelsDir, id });
+      if (ttsStoredVoiceId === id) { ttsStoredVoiceId = ''; ttsVoice = ''; }
+      await refreshVoices();
+    } catch (e) { ttsStatus = 'ошибка удаления: ' + String(e); }
   }
 
   async function refreshEngineStatus() {
@@ -130,6 +178,7 @@
         if (!ttsPreset && ttsPresets.length) ttsPreset = ttsPresets[0].id;
         refreshModels();
         refreshEngineStatus();
+        refreshVoices();
       });
 
     return () => {
@@ -238,11 +287,11 @@
   }
   async function pickModelsDir() {
     const picked = await open({ directory: true });
-    if (picked && typeof picked === 'string') { ttsModelsDir = picked; await saveSettings(); await refreshModels(); }
+    if (picked && typeof picked === 'string') { ttsModelsDir = picked; await saveSettings(); await refreshModels(); await refreshVoices(); }
   }
   async function pickVoiceWav() {
     const picked = await open({ filters: [{ name: 'WAV', extensions: ['wav'] }] });
-    if (picked && typeof picked === 'string') ttsVoice = picked;
+    if (picked && typeof picked === 'string') { ttsVoice = picked; ttsStoredVoiceId = ''; }
   }
 
   const selectedEngine = $derived(engineStatus.engines.find(e => e.id === ttsEngineBackend));
@@ -389,11 +438,11 @@
 
       <label for="tts_preset">Модель TTS (пресет):</label>
       <div class="row">
-        <select id="tts_preset" bind:value={ttsPreset} onchange={() => { ttsVoice = ''; saveSettings(); }}>
-          {#each ttsPresets as p}
-            <option value={p.id}>{p.label}{installedModels.find(m => m.id === p.id)?.installed ? ' ✓' : ' (не установлено)'}</option>
-          {/each}
-        </select>
+          <select id="tts_preset" bind:value={ttsPreset} onchange={() => { ttsVoice = ''; ttsStoredVoiceId = ''; saveSettings(); }}>
+            {#each ttsPresets as p}
+              <option value={p.id}>{p.label}{installedModels.find(m => m.id === p.id)?.installed ? ' ✓' : ' (не установлено)'}{p.voice_type === 'clone' ? ' 🔁' : ''}</option>
+            {/each}
+          </select>
       </div>
       {#if selectedPreset && !installedModels.find(m => m.id === ttsPreset)?.installed}
         <p class="hint warn">Модель не скачана. Откройте «Настройки → Папка моделей TTS» и нажмите «Скачать».</p>
@@ -408,11 +457,60 @@
           </datalist>
         </div>
       {:else if selectedPreset?.voice_type === 'clone'}
-        <label>Голос — клонирование из референсного WAV:</label>
+        <label for="tts_voice_sel">Голос (клонирование 🔁):</label>
         <div class="row">
-          <button onclick={pickVoiceWav}>выбрать WAV</button>
-          <span class="status">{ttsVoice ? ttsVoice.split('\\').pop() : 'не выбран'}</span>
+          <select id="tts_voice_sel" bind:value={ttsStoredVoiceId} onchange={(e) => {
+            const id = (e.currentTarget as HTMLSelectElement).value;
+            if (id) {
+              const v = ttsVoices.find(x => x.id === id);
+              ttsVoice = v ? v.path : '';
+            } else {
+              ttsVoice = '';
+            }
+          }}>
+            <option value="">— свой WAV (без сохранения) —</option>
+            {#each ttsVoices as v}
+              <option value={v.id}>{v.name}{v.has_avatar ? ' 🖼' : ''}</option>
+            {/each}
+          </select>
+          <button onclick={() => showAddVoice = !showAddVoice}>добавить голос</button>
         </div>
+
+        {#if ttsStoredVoiceId}
+          <div class="row">
+            <span class="status">{ttsVoice ? ttsVoice.split('\\').pop() : ''}</span>
+            <button class="small" onclick={() => deleteVoice(ttsStoredVoiceId)}>удалить</button>
+          </div>
+        {:else}
+          <div class="row">
+            <button onclick={pickVoiceWav}>выбрать свой WAV</button>
+            <span class="status">{ttsVoice ? ttsVoice.split('\\').pop() : 'не выбран'}</span>
+          </div>
+        {/if}
+
+        {#if showAddVoice}
+          <fieldset class="add-voice">
+            <legend>Новый голос</legend>
+            <label for="nv_name">Имя голоса:</label>
+            <input id="nv_name" bind:value={newVoiceName} placeholder="напр. Morgan Freeman" />
+            <label for="nv_audio">Референсное аудио (любой формат → WAV):</label>
+            <div class="row">
+              <button onclick={pickVoiceAudioForLib}>выбрать аудио</button>
+              <span class="status">{newVoiceAudio ? newVoiceAudio.split('\\').pop() : 'не выбрано'}</span>
+            </div>
+            <label for="nv_text">Референсный текст (опц., улучшает качество):</label>
+            <textarea id="nv_text" bind:value={newVoiceText} placeholder="что говорится в аудио"></textarea>
+            <label for="nv_avatar">Аватар (опц.):</label>
+            <div class="row">
+              <button onclick={pickVoiceAvatarForLib}>выбрать картинку</button>
+              <span class="status">{newVoiceAvatar ? newVoiceAvatar.split('\\').pop() : 'не выбрана'}</span>
+            </div>
+            <div class="row">
+              <button class="primary" onclick={submitAddVoice} disabled={addVoiceBusy}>сохранить голос</button>
+              <button onclick={() => showAddVoice = false}>отмена</button>
+            </div>
+          </fieldset>
+        {/if}
       {:else if selectedPreset?.voice_type === 'ggupack'}
         <p class="hint">Голосовой GGUF-пак скачивается автоматически вместе с моделью (стандартный голос).</p>
       {/if}
@@ -578,6 +676,10 @@
   .settings-section select { flex: 1; min-width: 240px; padding: 8px; border-radius: 6px; border: 1px solid #45475a; background: #313244; color: #cdd6f4; }
   .settings-section hr { border: none; border-top: 1px solid #45475a; margin: 16px 0; }
   .settings-section input[readonly] { opacity: 0.85; }
+  .add-voice { border: 1px solid #45475a; border-radius: 8px; padding: 12px; margin: 8px 0 12px; }
+  .add-voice legend { opacity: 0.8; padding: 0 6px; }
+  .add-voice label { margin-top: 8px; }
+  .add-voice textarea { width: 100%; box-sizing: border-box; min-height: 60px; background: #1e1e2e; color: #a6adc8; border: 1px solid #45475a; border-radius: 8px; padding: 8px; resize: vertical; font-family: system-ui, sans-serif; }
   .models { list-style: none; padding: 0; margin: 0; }
   .models li { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: #313244; border-radius: 6px; margin-bottom: 4px; }
   .mname { font-size: 13px; }
