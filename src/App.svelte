@@ -16,6 +16,7 @@
   let ttsPresets = $state<{
     id: string; label: string; backend: string; has_codec: boolean; has_voice: boolean;
     voice_type: string; voice_placeholder?: string; builtin_voices: string[]; supports_instruct: boolean;
+    supports_russian: boolean; size: string;
   }[]>([]);
   let ttsEngineBackends = $state<{ id: string; label: string; asset_name: string; url: string; tag: string }[]>([]);
 
@@ -44,7 +45,7 @@
   let dlBusy = $state(false);
 
   // статусы установленного
-  let installedModels = $state<{ id: string; label: string; installed: boolean }[]>([]);
+  let installedModels = $state<{ id: string; label: string; installed: boolean; size: string; supports_russian: boolean; voice_type: string }[]>([]);
   let engineStatus = $state<{ ok: boolean; latest: string; engines: { id: string; label: string; installed: boolean; installed_version: string | null; latest_version: string; update_available: boolean }[] }>({ ok: true, latest: '', engines: [] });
   let updateInfo = $state('');
 
@@ -57,6 +58,9 @@
   let logs = $state<string[]>([]);
 
   const selectedPreset = $derived(ttsPresets.find(p => p.id === ttsPreset));
+  const vt = $derived(selectedPreset?.voice_type);
+  const showNamed = $derived(vt === 'named' || vt === 'clone_named');
+  const showClone = $derived(vt === 'clone' || vt === 'clone_named');
 
   function addPaths(paths: string[]) {
     const filtered = paths.filter(Boolean);
@@ -110,7 +114,7 @@
       newVoiceName = ''; newVoiceAudio = ''; newVoiceText = ''; newVoiceAvatar = '';
       await refreshVoices();
       ttsStoredVoiceId = v.id;
-      ttsVoice = v.path;
+      ttsVoice = v.id;
     } catch (e) { ttsStatus = 'ошибка: ' + String(e); }
     finally { addVoiceBusy = false; }
   }
@@ -335,16 +339,14 @@
     if (!selectedPreset) { ttsStatus = 'выберите модель TTS'; return; }
     const isInstalled = installedModels.find(m => m.id === ttsPreset)?.installed;
     if (!isInstalled) { ttsStatus = 'модель не установлена — скачайте её в Настройках'; return; }
-    if (selectedPreset.voice_type === 'clone' && !ttsVoice) { ttsStatus = 'выберите референсный WAV для клонирования'; return; }
+    if ((showClone || showNamed) && !ttsVoice) { ttsStatus = 'выберите голос (имя или WAV для клонирования)'; return; }
 
     ttsBusy = true;
     ttsStatus = 'готовлю движок...';
-    const voiceIsWav = selectedPreset.voice_type === 'clone' && ttsVoice.toLowerCase().endsWith('.wav');
     try {
       const wav = await invoke<number[] | Uint8Array>('tts_speak', {
         preset: ttsPreset,
         voice: ttsVoice,
-        voiceIsWav,
         instruct: selectedPreset.supports_instruct ? ttsInstruct : '',
         speed: ttsSpeed,
         text: ttsText,
@@ -439,16 +441,16 @@
       <label for="tts_preset">Модель TTS (пресет):</label>
       <div class="row">
           <select id="tts_preset" bind:value={ttsPreset} onchange={() => { ttsVoice = ''; ttsStoredVoiceId = ''; saveSettings(); }}>
-            {#each ttsPresets as p}
-              <option value={p.id}>{p.label}{installedModels.find(m => m.id === p.id)?.installed ? ' ✓' : ' (не установлено)'}{p.voice_type === 'clone' ? ' 🔁' : ''}</option>
+            {#each ttsPresets.filter(p => installedModels.find(m => m.id === p.id)?.installed) as p}
+              <option value={p.id}>{p.label} ({p.size}){(p.voice_type === 'clone' || p.voice_type === 'clone_named') ? ' 🎭' : ''}</option>
             {/each}
           </select>
       </div>
-      {#if selectedPreset && !installedModels.find(m => m.id === ttsPreset)?.installed}
-        <p class="hint warn">Модель не скачана. Откройте «Настройки → Папка моделей TTS» и нажмите «Скачать».</p>
+      {#if ttsPresets.filter(p => installedModels.find(m => m.id === p.id)?.installed).length === 0}
+        <p class="hint warn">Нет установленных моделей. Откройте «Настройки → Папка моделей TTS» и нажмите «Скачать».</p>
       {/if}
 
-      {#if selectedPreset?.voice_type === 'named'}
+      {#if showNamed}
         <label for="tts_voice">Имя голоса (встроенный спикер):</label>
         <div class="row">
           <input id="tts_voice" list="voice-list" bind:value={ttsVoice} placeholder="напр. af_heart / vivian" />
@@ -456,14 +458,15 @@
             {#each selectedPreset.builtin_voices as v}<option value={v}></option>{/each}
           </datalist>
         </div>
-      {:else if selectedPreset?.voice_type === 'clone'}
-        <label for="tts_voice_sel">Голос (клонирование 🔁):</label>
+      {/if}
+      {#if showClone}
+        <label for="tts_voice_sel">Голос (клонирование 🎭):</label>
         <div class="row">
           <select id="tts_voice_sel" bind:value={ttsStoredVoiceId} onchange={(e) => {
             const id = (e.currentTarget as HTMLSelectElement).value;
             if (id) {
               const v = ttsVoices.find(x => x.id === id);
-              ttsVoice = v ? v.path : '';
+              ttsVoice = v ? v.id : '';
             } else {
               ttsVoice = '';
             }
@@ -511,7 +514,8 @@
             </div>
           </fieldset>
         {/if}
-      {:else if selectedPreset?.voice_type === 'ggupack'}
+      {/if}
+      {#if !showNamed && !showClone && selectedPreset?.voice_type === 'ggupack'}
         <p class="hint">Голосовой GGUF-пак скачивается автоматически вместе с моделью (стандартный голос).</p>
       {/if}
 
@@ -586,12 +590,16 @@
       <ul class="models">
         {#each installedModels as m}
           <li>
-            <span class="mname">{m.label}</span>
-            {#if m.installed}
-              <span class="ok">✓ установлено</span>
-            {:else}
-              <button class="small" onclick={() => downloadModel(m.id)} disabled={dlBusy}>скачать</button>
-            {/if}
+            <span class="mname">{m.label}{(m.voice_type === 'clone' || m.voice_type === 'clone_named') ? ' 🎭' : ''}</span>
+            <span class="badges">
+              <span class="badge">{m.size}</span>
+              {#if m.supports_russian}<span class="badge ru">RU</span>{/if}
+              {#if m.installed}
+                <span class="badge ok"><span class="dot"></span>установлено</span>
+              {:else}
+                <button class="small" onclick={() => downloadModel(m.id)} disabled={dlBusy}>скачать</button>
+              {/if}
+            </span>
           </li>
         {/each}
       </ul>
@@ -619,7 +627,7 @@
 </main>
 
 <style>
-  :global(body) { font-family: system-ui, sans-serif; margin: 0; background: #1e1e2e; color: #cdd6f4; }
+  :global(body) { font-family: system-ui, sans-serif; margin: 0; background: #1e1e2e; color: #cdd6f4; color-scheme: dark; }
   main { max-width: 900px; margin: 0 auto; padding: 24px; }
   h1 { font-size: 22px; }
   .tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid #45475a; padding-bottom: 10px; }
@@ -673,7 +681,9 @@
   .settings-section h2 { font-size: 18px; margin: 0 0 14px; }
   .settings-section h3 { font-size: 15px; margin: 14px 0 8px; opacity: 0.85; }
   .settings-section h4 { font-size: 14px; margin: 12px 0 6px; opacity: 0.8; }
-  .settings-section select { flex: 1; min-width: 240px; padding: 8px; border-radius: 6px; border: 1px solid #45475a; background: #313244; color: #cdd6f4; }
+  select { flex: 1; min-width: 240px; padding: 8px; border-radius: 6px; border: 1px solid #45475a; background: #313244; color: #cdd6f4; }
+  select option { background: #313244; color: #cdd6f4; }
+  input[type="range"] { accent-color: #89b4fa; }
   .settings-section hr { border: none; border-top: 1px solid #45475a; margin: 16px 0; }
   .settings-section input[readonly] { opacity: 0.85; }
   .add-voice { border: 1px solid #45475a; border-radius: 8px; padding: 12px; margin: 8px 0 12px; }
@@ -681,7 +691,12 @@
   .add-voice label { margin-top: 8px; }
   .add-voice textarea { width: 100%; box-sizing: border-box; min-height: 60px; background: #1e1e2e; color: #a6adc8; border: 1px solid #45475a; border-radius: 8px; padding: 8px; resize: vertical; font-family: system-ui, sans-serif; }
   .models { list-style: none; padding: 0; margin: 0; }
-  .models li { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: #313244; border-radius: 6px; margin-bottom: 4px; }
+  .models li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px; background: #313244; border-radius: 6px; margin-bottom: 4px; }
   .mname { font-size: 13px; }
   .ok { color: #a6e3a1; font-size: 13px; }
+  .badges { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  .badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; background: #45475a; color: #cdd6f4; white-space: nowrap; }
+  .badge.ru { background: #313244; color: #f38ba8; border: 1px solid #f38ba8; font-weight: 600; }
+  .badge.ok { background: #1e2a1e; color: #a6e3a1; display: inline-flex; align-items: center; gap: 5px; }
+  .badge.ok .dot { width: 8px; height: 8px; border-radius: 50%; background: #a6e3a1; box-shadow: 0 0 6px #a6e3a1; }
 </style>

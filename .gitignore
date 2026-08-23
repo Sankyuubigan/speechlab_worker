@@ -36,3 +36,4 @@ dist-ssr
 /src-tauri/gen
 /package-lock.json
 /tasks
+/test

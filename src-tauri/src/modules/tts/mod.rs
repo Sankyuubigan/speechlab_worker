@@ -8,7 +8,9 @@ use std::time::Duration;
 use std::os::windows::process::CommandExt;
 
 use reqwest::Client;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
+
+use crate::modules::process_util::{kill_process_tree, JobGuard};
 
 pub mod download;
 pub mod settings;
@@ -27,6 +29,8 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(120);
 /// Всегда 100% локально: без API-ключей, без облака (требование пользователя).
 pub struct TtsEngine {
     child: Mutex<Option<Child>>,
+    /// Job Object (Windows), гарантирующий зачистку дерева процессов при выходе.
+    job: Mutex<Option<JobGuard>>,
     port: Mutex<u16>,
     loaded_model: Mutex<String>,
     loaded_codec: Mutex<String>,
@@ -38,6 +42,7 @@ impl TtsEngine {
     pub fn new() -> Self {
         Self {
             child: Mutex::new(None),
+            job: Mutex::new(None),
             port: Mutex::new(0),
             loaded_model: Mutex::new(String::new()),
             loaded_codec: Mutex::new(String::new()),
@@ -61,16 +66,28 @@ impl TtsEngine {
         Some(port)
     }
 
-    fn kill_child(child: &mut Child) {
-        let _ = child.kill();
-        #[cfg(windows)]
-        {
-            let pid = child.id();
-            let _ = Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .output();
+    /// Убивает движок: дёргает Job Object (весь процесс-трий целиком) и дублирует
+    /// `kill_process_tree` (`taskkill /F /T` до репарентинга). `job` сбрасывается
+    /// при выходе из области видимости (закрытие хендла → KILL_ON_JOB_CLOSE).
+    fn kill_now(mut child: Child, job: Option<JobGuard>) {
+        if let Some(j) = &job {
+            j.terminate();
+        }
+        kill_process_tree(&mut child);
+        // job (и child) корректно освобождаются здесь.
+    }
+
+    /// Берёт child+job из мьютексов (устойчиво к poison) и убивает движок.
+    fn reap(&self) {
+        let child = self
+            .child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let job = self.job.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match child {
+            Some(c) => Self::kill_now(c, job),
+            None => drop(job),
         }
     }
 
@@ -105,7 +122,7 @@ impl TtsEngine {
         };
         let folder = base.join(preset_id);
 
-        let model = folder.join(preset.model_file);
+        let model = folder.join(&preset.model_file);
         if !model.exists() {
             return Err(format!(
                 "модель не найдена: {} (скачайте пресет в Настройках)",
@@ -114,7 +131,7 @@ impl TtsEngine {
         }
 
         let mut codec_path = String::new();
-        if let Some((cf, _)) = preset.codec {
+        if let Some((cf, _)) = &preset.codec {
             let p = folder.join(cf);
             if !p.exists() {
                 return Err(format!("codec-модель не найдена: {}", p.display()));
@@ -164,6 +181,10 @@ impl TtsEngine {
         if !codec_path.is_empty() {
             cmd.args(["--codec-model", &codec_path]);
         }
+        // Хранилище голосов: сервер резолвит `voice` против --voice-dir и отвергает
+        // любые пути в поле `voice` (bug `400 invalid_voice`). Обязателен для клонирования.
+        let voice_dir = voices::voices_root(models_dir);
+        cmd.args(["--voice-dir", &voice_dir.to_string_lossy()]);
         // Голос-пак GGUF грузим при старте; именованные/клонированные — в теле запроса.
         if !startup_voice_path.is_empty() {
             cmd.args(["--voice", &startup_voice_path]);
@@ -176,13 +197,17 @@ impl TtsEngine {
             .spawn()
             .map_err(|e| format!("не удалось запустить движок '{engine_exe}': {e}"))?;
 
+        // Назначаем процесс в Job Object (Windows): гарантирует зачистку всего
+        // дерева процессов даже при насильственном закрытии приложения.
+        let job = JobGuard::assign(&child);
+
         // Перенаправляем stderr движка в Логи.
         if let Some(stderr) = child.stderr.take() {
             let app_clone = app.clone();
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().flatten() {
-                    let _ = app_clone.emit("app-log", format!("[crispasr] {line}"));
+                    crate::modules::log::app_log(&app_clone, &format!("[crispasr] {line}"));
                 }
             });
         }
@@ -210,11 +235,12 @@ impl TtsEngine {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
         if !ready {
-            Self::kill_child(&mut child);
+            Self::kill_now(child, job);
             return Err("таймаут ожидания готовности движка (120 c)".into());
         }
 
         *self.child.lock().unwrap() = Some(child);
+        *self.job.lock().unwrap() = job;
         *self.port.lock().unwrap() = port;
         *self.loaded_model.lock().unwrap() = model.to_string_lossy().to_string();
         *self.loaded_codec.lock().unwrap() = codec_path;
@@ -226,13 +252,14 @@ impl TtsEngine {
     /// Синтезирует текст в WAV и возвращает сырые байты.
     ///
     /// `voice` — имя спикера или путь к WAV для клонирования (передаётся в теле запроса,
-    /// per-request). `is_voice_wav` добавляет `consent_attestation` для клонирования.
+    /// per-request; может быть пустым). `consent_attestation` добавляется ВСЕГДА
+    /// (требование CosyVoice3 и других бэкендов — даже при пустом/дефолтном voice любой
+    /// синтез трактуется как клонирование). Лишнее поле другие бэкенды игнорируют.
     /// `instructions` — стиль/описание голоса (только для поддерживающих моделей).
     pub async fn speak(
         &self,
         text: &str,
         voice: &str,
-        is_voice_wav: bool,
         instructions: &str,
         speed: f32,
     ) -> Result<Vec<u8>, String> {
@@ -251,15 +278,16 @@ impl TtsEngine {
         body.insert("response_format".into(), serde_json::Value::String("wav".into()));
         if !voice.is_empty() {
             body.insert("voice".into(), serde_json::Value::String(voice.to_string()));
-            if is_voice_wav {
-                body.insert(
-                    "consent_attestation".into(),
-                    serde_json::Value::String(
-                        "I confirm I have the legal right to clone this voice.".into(),
-                    ),
-                );
-            }
         }
+        // consent_attestation требуется бэкендами (напр. CosyVoice3) всегда — даже при
+        // пустом/дефолтном voice любой синтез трактуется как клонирование. Безопасно для
+        // остальных бэкендов (игнорируют неизвестное поле).
+        body.insert(
+            "consent_attestation".into(),
+            serde_json::Value::String(
+                "I confirm I have the legal right to clone this voice.".into(),
+            ),
+        );
         if !instructions.is_empty() {
             body.insert(
                 "instructions".into(),
@@ -294,10 +322,7 @@ impl TtsEngine {
 
     /// Останавливает движок (выгрузка моделей из VRAM).
     pub async fn stop(&self) {
-        if let Some(mut c) = self.child.lock().unwrap().take() {
-            Self::kill_child(&mut c);
-            let _ = c.wait();
-        }
+        self.reap();
         *self.loaded_model.lock().unwrap() = String::new();
         *self.loaded_codec.lock().unwrap() = String::new();
         *self.loaded_voice.lock().unwrap() = String::new();
@@ -313,8 +338,6 @@ impl Default for TtsEngine {
 
 impl Drop for TtsEngine {
     fn drop(&mut self) {
-        if let Some(mut c) = self.child.lock().unwrap().take() {
-            Self::kill_child(&mut c);
-        }
+        self.reap();
     }
 }

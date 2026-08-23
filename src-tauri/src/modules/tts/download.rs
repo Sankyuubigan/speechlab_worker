@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -11,249 +12,88 @@ pub const RELEASE_API: &str = "https://api.github.com/repos/CrispStrobe/CrispASR
 
 /// Описание пресета TTS-движка CrispASR.
 ///
-/// `backend` — имя бэкенда для `--backend` сервера. `model_url`/`codec`/`voice`/`extras` —
+/// Пресеты грузятся из `tts_models.json` (корень проекта / рядом с exe), этот
+/// struct — схема того файла. Поля:
+/// `backend` — имя бэкенда для `--backend` сервера; `model_url`/`codec`/`voice`/`extras` —
 /// канонические GGUF из реестра CrispASR (HF `cstr/*`), скачиваются в одну папку;
-/// сопутствующие файлы движок находит сам (sibling auto-discovery).
-///
-/// `voice_type` — как задаётся голос для этого движка:
-/// - `"none"`    — голос не выбирается (фиксированный/один на модель)
-/// - `"named"`   — по имени спикера (`--voice <name>`, встроенные имена в `builtin_voices`)
-/// - `"clone"`   — клонирование из референсного WAV (`--voice ref.wav`)
-/// - `"ggupack"` — GGUF voice-пак, скачивается вместе с моделью и грузится при старте
-///
-/// `supports_instruct` — передаёт ли движок стиль/описание голоса через `instructions`
-/// (qwen3-tts-customvoice, parler-tts, irodori-tts, …).
-#[derive(Clone, Copy)]
+/// `voice_type` — `"none" | "named" | "clone" | "ggupack"`; `supports_instruct` —
+/// передаёт ли движок стиль через `instructions`; `supports_russian` — поддержка RU;
+/// `size` — примерный вес скачиваемых GGUF (для GUI).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TtsPreset {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub backend: &'static str,
-    pub model_file: &'static str,
-    pub model_url: &'static str,
-    pub codec: Option<(&'static str, &'static str)>,
-    pub voice: Option<(&'static str, &'static str)>,
-    pub extras: &'static [(&'static str, &'static str)],
-    pub voice_type: &'static str,
-    pub builtin_voices: &'static [&'static str],
+    pub id: String,
+    pub label: String,
+    pub backend: String,
+    pub model_file: String,
+    pub model_url: String,
+    pub codec: Option<(String, String)>,
+    pub voice: Option<(String, String)>,
+    pub extras: Vec<(String, String)>,
+    pub voice_type: String,
+    pub builtin_voices: Vec<String>,
     pub supports_instruct: bool,
+    /// Поддерживает ли модель русский язык на синтез.
+    pub supports_russian: bool,
+    /// Примерный вес скачиваемых GGUF (для отображения в GUI).
+    pub size: String,
 }
 
-pub const PRESETS: &[TtsPreset] = &[
-    TtsPreset {
-        id: "qwen3-tts",
-        label: "Qwen3-TTS 0.6B (базовый, RU, голос-пак)",
-        backend: "qwen3-tts",
-        model_file: "qwen3-tts-12hz-0.6b-base-q8_0.gguf",
-        model_url:
-            "https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF/resolve/main/qwen3-tts-12hz-0.6b-base-q8_0.gguf",
-        codec: Some((
-            "qwen3-tts-tokenizer-12hz.gguf",
-            "https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf",
-        )),
-        voice: Some((
-            "qwen3-tts-voice-default.gguf",
-            "https://huggingface.co/cstr/qwen3-tts-voices-GGUF/resolve/main/qwen3-tts-voice-default.gguf",
-        )),
-        extras: &[],
-        voice_type: "ggupack",
-        builtin_voices: &[],
-        supports_instruct: false,
-    },
-    TtsPreset {
-        id: "qwen3-tts-customvoice",
-        label: "Qwen3-TTS 1.7B CustomVoice (инструкции по стилю, RU)",
-        backend: "qwen3-tts-customvoice",
-        model_file: "qwen3-tts-12hz-1.7b-customvoice-q8_0.gguf",
-        model_url:
-            "https://huggingface.co/cstr/qwen3-tts-1.7b-customvoice-GGUF/resolve/main/qwen3-tts-12hz-1.7b-customvoice-q8_0.gguf",
-        codec: Some((
-            "qwen3-tts-tokenizer-12hz.gguf",
-            "https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf",
-        )),
-        voice: None,
-        extras: &[],
-        voice_type: "named",
-        builtin_voices: &["vivian", "ryan", "emma", "noah", "olivia", "liam", "sophia", "lucas", "mia"],
-        supports_instruct: true,
-    },
-    TtsPreset {
-        id: "parler-tts",
-        label: "Parler-TTS Mini 1.1 (описание голоса словами, EN)",
-        backend: "parler-tts",
-        model_file: "parler-tts-mini-v1.1-q8_0.gguf",
-        model_url:
-            "https://huggingface.co/cstr/parler-tts-mini-v1.1-GGUF/resolve/main/parler-tts-mini-v1.1-q8_0.gguf",
-        codec: None,
-        voice: None,
-        extras: &[],
-        voice_type: "none",
-        builtin_voices: &[],
-        supports_instruct: true,
-    },
-    TtsPreset {
-        id: "irodori-tts",
-        label: "Irodori-TTS 500M v3 (клонирование WAV + эмоции, JA)",
-        backend: "irodori-tts",
-        model_file: "irodori-tts-500m-v3-q8_0.gguf",
-        model_url:
-            "https://huggingface.co/cstr/irodori-tts-GGUF/resolve/main/irodori-tts-500m-v3-q8_0.gguf",
-        codec: Some((
-            "dacvae-ja-32dim-f16.gguf",
-            "https://huggingface.co/cstr/irodori-tts-GGUF/resolve/main/dacvae-ja-32dim-f16.gguf",
-        )),
-        voice: None,
-        extras: &[],
-        voice_type: "clone",
-        builtin_voices: &[],
-        supports_instruct: true,
-    },
-    TtsPreset {
-        id: "kokoro",
-        label: "Kokoro 82M (быстрый, мультиязычный)",
-        backend: "kokoro",
-        model_file: "kokoro-82m-q8_0.gguf",
-        model_url: "https://huggingface.co/cstr/kokoro-82m-GGUF/resolve/main/kokoro-82m-q8_0.gguf",
-        codec: None,
-        voice: Some((
-            "kokoro-voice-af_heart.gguf",
-            "https://huggingface.co/cstr/kokoro-voices-GGUF/resolve/main/kokoro-voice-af_heart.gguf",
-        )),
-        extras: &[],
-        voice_type: "ggupack",
-        builtin_voices: &[
-            "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore",
-            "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky", "am_adam",
-            "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx",
-            "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
-            "bm_daniel", "bm_fred", "bm_george", "bm_leo",
-        ],
-        supports_instruct: false,
-    },
-    TtsPreset {
-        id: "bark",
-        label: "Bark-small (мультиязычный, маркеры спикера)",
-        backend: "bark",
-        model_file: "bark-small-q8_0.gguf",
-        model_url: "https://huggingface.co/cstr/bark-small-GGUF/resolve/main/bark-small-q8_0.gguf",
-        codec: None,
-        voice: None,
-        extras: &[],
-        voice_type: "none",
-        builtin_voices: &[],
-        supports_instruct: false,
-    },
-    TtsPreset {
-        id: "zonos",
-        label: "Zonos v0.1 (2B, клонирование голоса, 44.1 kHz)",
-        backend: "zonos",
-        model_file: "zonos-v0.1-transformer-q8_0.gguf",
-        model_url:
-            "https://huggingface.co/cstr/zonos-v0.1-transformer-GGUF/resolve/main/zonos-v0.1-transformer-q8_0.gguf",
-        codec: Some((
-            "dac-44khz-f16.gguf",
-            "https://huggingface.co/cstr/dac-44khz-GGUF/resolve/main/dac-44khz-f16.gguf",
-        )),
-        voice: None,
-        extras: &[],
-        voice_type: "clone",
-        builtin_voices: &[],
-        supports_instruct: false,
-    },
-    TtsPreset {
-        id: "chatterbox",
-        label: "Chatterbox v3 (клонирование голоса, 23 языка)",
-        backend: "chatterbox",
-        model_file: "chatterbox-v3-t3-q8_0.gguf",
-        model_url: "https://huggingface.co/cstr/chatterbox-GGUF/resolve/main/chatterbox-v3-t3-q8_0.gguf",
-        codec: Some((
-            "chatterbox-v3-s3gen-q8_0.gguf",
-            "https://huggingface.co/cstr/chatterbox-GGUF/resolve/main/chatterbox-v3-s3gen-q8_0.gguf",
-        )),
-        voice: None,
-        extras: &[],
-        voice_type: "clone",
-        builtin_voices: &[],
-        supports_instruct: false,
-    },
-    TtsPreset {
-        id: "vibevoice-tts",
-        label: "VibeVoice-Realtime 0.5B (быстрый, en/zh)",
-        backend: "vibevoice-tts",
-        model_file: "vibevoice-realtime-0.5b-q4_k.gguf",
-        model_url:
-            "https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF/resolve/main/vibevoice-realtime-0.5b-q4_k.gguf",
-        codec: None,
-        voice: Some((
-            "vibevoice-voice-emma.gguf",
-            "https://huggingface.co/cstr/vibevoice-realtime-0.5b-GGUF/resolve/main/vibevoice-voice-emma.gguf",
-        )),
-        extras: &[],
-        voice_type: "ggupack",
-        builtin_voices: &[],
-        supports_instruct: false,
-    },
-    TtsPreset {
-        id: "cosyvoice3-tts",
-        label: "CosyVoice3 0.5B (клонирование WAV, 9 яз.)",
-        backend: "cosyvoice3-tts",
-        model_file: "cosyvoice3-llm-q4_k.gguf",
-        model_url:
-            "https://huggingface.co/cstr/cosyvoice3-0.5b-2512-GGUF/resolve/main/cosyvoice3-llm-q4_k.gguf",
-        codec: Some((
-            "cosyvoice3-flow-q8_0.gguf",
-            "https://huggingface.co/cstr/cosyvoice3-0.5b-2512-GGUF/resolve/main/cosyvoice3-flow-q8_0.gguf",
-        )),
-        voice: None,
-        extras: &[
-            (
-                "cosyvoice3-campplus-f16.gguf",
-                "https://huggingface.co/cstr/cosyvoice3-0.5b-2512-GGUF/resolve/main/cosyvoice3-campplus-f16.gguf",
-            ),
-            (
-                "cosyvoice3-s3tok-f16.gguf",
-                "https://huggingface.co/cstr/cosyvoice3-0.5b-2512-GGUF/resolve/main/cosyvoice3-s3tok-f16.gguf",
-            ),
-            (
-                "cosyvoice3-hift-f16.gguf",
-                "https://huggingface.co/cstr/cosyvoice3-0.5b-2512-GGUF/resolve/main/cosyvoice3-hift-f16.gguf",
-            ),
-            (
-                "cosyvoice3-voices.gguf",
-                "https://huggingface.co/cstr/cosyvoice3-0.5b-2512-GGUF/resolve/main/cosyvoice3-voices.gguf",
-            ),
-        ],
-        voice_type: "named",
-        builtin_voices: &[
-            "zero_shot", "fleurs-en", "fleurs-de", "fleurs-zh", "fleurs-ja",
-            "fleurs-fr", "fleurs-es", "fleurs-ko",
-        ],
-        supports_instruct: false,
-    },
-    TtsPreset {
-        id: "voxcpm2-tts",
-        label: "VoxCPM2 (2B, клонирование WAV, 48 kHz)",
-        backend: "voxcpm2-tts",
-        model_file: "voxcpm2-q4_k.gguf",
-        model_url: "https://huggingface.co/cstr/voxcpm2-GGUF/resolve/main/voxcpm2-q4_k.gguf",
-        codec: None,
-        voice: None,
-        extras: &[],
-        voice_type: "none",
-        builtin_voices: &[],
-        supports_instruct: false,
-    },
-];
+static PRESETS_CACHE: OnceLock<Vec<TtsPreset>> = OnceLock::new();
+
+/// Загружает пресеты из `tts_models.json`.
+///
+/// Порядок резолва файла:
+/// 1) `tts_models.json` рядом с текущим exe;
+/// 2) подъём вверх по каталогам от exe (ловит корень проекта в dev-сборке);
+/// 3) встроенная копия (`include_str!`), если файл не найден или невалиден.
+///
+/// Любая ошибка внешнего файла -> используется встроенная копия, чтобы приложение
+/// оставалось рабочим.
+pub fn presets() -> &'static [TtsPreset] {
+    PRESETS_CACHE.get_or_init(|| {
+        if let Some(path) = find_tts_models_json() {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<Vec<TtsPreset>>(&text) {
+                    if !v.is_empty() {
+                        return v;
+                    }
+                }
+            }
+        }
+        serde_json::from_str(EMBEDDED_TTS_MODELS_JSON)
+            .expect("встроенный tts_models.json невалиден")
+    })
+}
+
+/// Встроенная копия `tts_models.json` из корня проекта (на момент компиляции).
+const EMBEDDED_TTS_MODELS_JSON: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../tts_models.json"));
+
+/// Ищет `tts_models.json`, начиная от каталога текущего exe и поднимаясь вверх.
+fn find_tts_models_json() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?;
+    for _ in 0..12 {
+        let cand = dir.join("tts_models.json");
+        if cand.is_file() {
+            return Some(cand);
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
 
 pub fn preset_by_id(id: &str) -> Option<&'static TtsPreset> {
-    PRESETS.iter().find(|p| p.id == id)
+    let id_low = id.to_lowercase();
+    presets().iter().find(|p| p.id.to_lowercase() == id_low)
 }
 
 pub fn preset_backend(id: &str) -> Option<&'static str> {
-    preset_by_id(id).map(|p| p.backend)
+    preset_by_id(id).map(|p| p.backend.as_str())
 }
 
 pub fn list_presets() -> Vec<serde_json::Value> {
-    PRESETS
+    presets()
         .iter()
         .map(|p| {
             json!({
@@ -265,6 +105,8 @@ pub fn list_presets() -> Vec<serde_json::Value> {
                 "voice_type": p.voice_type,
                 "builtin_voices": p.builtin_voices,
                 "supports_instruct": p.supports_instruct,
+                "supports_russian": p.supports_russian,
+                "size": p.size,
             })
         })
         .collect()
@@ -524,28 +366,28 @@ pub async fn download_model(
     let preset = preset_by_id(preset_id)
         .ok_or_else(|| format!("неизвестный пресет TTS: {preset_id}"))?;
 
-    let dest = PathBuf::from(dest_dir).join(preset_id);
+    let dest = PathBuf::from(dest_dir).join(&preset.id);
     std::fs::create_dir_all(&dest)
         .map_err(|e| format!("не удалось создать папку {}: {e}", dest.display()))?;
 
-    let model = dest.join(preset.model_file);
-    download_to(app, preset.model_url, &model, "model").await?;
+    let model = dest.join(&preset.model_file);
+    download_to(app, &preset.model_url, &model, "model").await?;
 
     let mut codec_path = String::new();
-    if let Some((cf, cu)) = preset.codec {
+    if let Some((cf, cu)) = &preset.codec {
         let p = dest.join(cf);
         download_to(app, cu, &p, "model").await?;
         codec_path = p.to_string_lossy().to_string();
     }
 
     let mut voice_path = String::new();
-    if let Some((vf, vu)) = preset.voice {
+    if let Some((vf, vu)) = &preset.voice {
         let p = dest.join(vf);
         download_to(app, vu, &p, "model").await?;
         voice_path = p.to_string_lossy().to_string();
     }
 
-    for (ef, eu) in preset.extras {
+    for (ef, eu) in &preset.extras {
         let p = dest.join(ef);
         download_to(app, eu, &p, "model").await?;
     }
@@ -564,16 +406,16 @@ pub fn list_installed_models(models_dir: &str) -> Vec<serde_json::Value> {
     } else {
         PathBuf::from(models_dir)
     };
-    PRESETS
+    presets()
         .iter()
         .map(|p| {
-            let folder = base.join(p.id);
-            let has_model = folder.join(p.model_file).exists();
-            let has_codec = match p.codec {
+            let folder = base.join(&p.id);
+            let has_model = folder.join(&p.model_file).exists();
+            let has_codec = match &p.codec {
                 Some((cf, _)) => folder.join(cf).exists(),
                 None => true,
             };
-            let has_voice = match p.voice {
+            let has_voice = match &p.voice {
                 Some((vf, _)) => folder.join(vf).exists(),
                 None => true,
             };
@@ -585,6 +427,9 @@ pub fn list_installed_models(models_dir: &str) -> Vec<serde_json::Value> {
                 "has_model": has_model,
                 "has_codec": has_codec,
                 "has_voice": has_voice,
+                "voice_type": p.voice_type,
+                "size": p.size,
+                "supports_russian": p.supports_russian,
             })
         })
         .collect()

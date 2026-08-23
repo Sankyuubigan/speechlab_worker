@@ -3,7 +3,7 @@ mod modules;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use serde_json::{json, Value};
 
 use modules::asr::gigaam::ModelRunner;
@@ -19,8 +19,7 @@ pub struct AppState {
 }
 
 fn emit_log(app: &AppHandle, msg: &str) {
-    println!("{}", msg);
-    let _ = app.emit("app-log", msg);
+    crate::modules::log::app_log(app, msg);
 }
 
 #[tauri::command]
@@ -157,7 +156,6 @@ async fn tts_speak(
     state: State<'_, AppState>,
     preset: String,
     voice: String,
-    voice_is_wav: bool,
     instruct: String,
     speed: f32,
     text: String,
@@ -175,7 +173,9 @@ async fn tts_speak(
         .to_string();
 
     let preset_def = download::preset_by_id(&preset);
-    let voice_type = preset_def.map(|p| p.voice_type).unwrap_or("none");
+    let voice_type = preset_def
+        .map(|p| p.voice_type.clone())
+        .unwrap_or_else(|| "none".to_string());
     let supports_instruct = preset_def.map(|p| p.supports_instruct).unwrap_or(false);
 
     // Голос-пак GGUF грузим при старте сервера; именованный/WAV — в теле запроса.
@@ -186,7 +186,7 @@ async fn tts_speak(
             std::path::PathBuf::from(&settings.models_dir)
         };
         if let Some(p) = preset_def {
-            if let Some((vf, _)) = p.voice {
+            if let Some((vf, _)) = &p.voice {
                 let vp = base.join(&preset).join(vf);
                 if vp.exists() {
                     vp.to_string_lossy().to_string()
@@ -220,10 +220,16 @@ async fn tts_speak(
         })?;
 
     // Голос для тела запроса — только для named/clone (ggupack уже загружен при старте).
+    // Резолвим в bare-id, который сервер подставит в <voice-dir>/<id>.wav (без
+    // разделителей путей — иначе 400 invalid_voice).
     let body_voice = if voice_type == "ggupack" {
         String::new()
     } else {
-        voice.clone()
+        modules::tts::voices::resolve_voice_for_server(&s.models_dir, &voice)
+            .map_err(|e| {
+                emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
+                e
+            })?
     };
     let body_instruct = if supports_instruct && !instruct.is_empty() {
         instruct.clone()
@@ -234,7 +240,7 @@ async fn tts_speak(
     emit_log(&app, "ТТС: синтез речи...");
     let wav = state
         .tts
-        .speak(&text, &body_voice, voice_is_wav, &body_instruct, speed)
+        .speak(&text, &body_voice, &body_instruct, speed)
         .await
         .map_err(|e| {
             emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
@@ -394,6 +400,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|_app| {
+            crate::modules::log::truncate_last_logs();
+            // Зачистка зомби от предыдущих крашей (rules.md §6.5).
+            crate::modules::process_util::kill_active_engines();
+            Ok(())
+        })
         .manage(AppState {
             model: Mutex::new(None),
             model_dir: Mutex::new(String::new()),
@@ -420,6 +432,13 @@ pub fn run() {
             tts_get_settings,
             tts_save_settings
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Финальный сейфнет: если Drop не успел (насильственное закрытие),
+            // добиваем все висящие движки глобально.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                crate::modules::process_util::kill_active_engines();
+            }
+        });
 }
