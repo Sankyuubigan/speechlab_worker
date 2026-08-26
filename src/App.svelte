@@ -4,6 +4,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import VoiceStorage from './lib/VoiceStorage.svelte';
 
   let activeTab = $state<'main' | 'tts' | 'settings' | 'logs'>('main');
   let modelDir = $state('D:\\nn\\models\\stt\\gigaam-v3');
@@ -28,12 +29,6 @@
   let ttsStoredVoiceId = $state('');  // id сохранённого голоса из хранилища, '' = свой WAV
   let ttsVoiceMode = $state<'preset' | 'clone'>('preset'); // для clone_named: встроенный спикер / клон своего WAV
   let ttsVoices = $state<{ id: string; name: string; path: string; ref_text: string; has_avatar: boolean; created_at: string }[]>([]);
-  let showAddVoice = $state(false);
-  let newVoiceName = $state('');
-  let newVoiceAudio = $state('');
-  let newVoiceText = $state('');
-  let newVoiceAvatar = $state('');
-  let addVoiceBusy = $state(false);
   let ttsInstruct = $state('');
   let ttsSpeed = $state(1.0);
   let ttsText = $state('Привет, это тест синтеза речи.');
@@ -94,39 +89,6 @@
     try {
       ttsVoices = await invoke('tts_list_voices', { modelsDir: ttsModelsDir });
     } catch { ttsVoices = []; }
-  }
-
-  async function pickVoiceAudioForLib() {
-    const picked = await open({ filters: [{ name: 'Audio', extensions: ['wav', 'mp3', 'ogg', 'flac', 'm4a', 'opus'] }] });
-    if (picked && typeof picked === 'string') newVoiceAudio = picked;
-  }
-  async function pickVoiceAvatarForLib() {
-    const picked = await open({ filters: [{ name: 'Image', extensions: ['jpg', 'jpeg', 'png', 'webp'] }] });
-    if (picked && typeof picked === 'string') newVoiceAvatar = picked;
-  }
-  async function submitAddVoice() {
-    if (!newVoiceName.trim() || !newVoiceAudio) { ttsStatus = 'заполните имя и аудио'; return; }
-    addVoiceBusy = true;
-    try {
-      const v = await invoke<{ id: string; path: string }>('tts_add_voice', {
-        modelsDir: ttsModelsDir, name: newVoiceName, srcAudio: newVoiceAudio,
-        refText: newVoiceText, avatar: newVoiceAvatar,
-      });
-      ttsStatus = 'голос добавлен';
-      showAddVoice = false;
-      newVoiceName = ''; newVoiceAudio = ''; newVoiceText = ''; newVoiceAvatar = '';
-      await refreshVoices();
-      ttsStoredVoiceId = v.id;
-      ttsVoice = v.id;
-    } catch (e) { ttsStatus = 'ошибка: ' + String(e); }
-    finally { addVoiceBusy = false; }
-  }
-  async function deleteVoice(id: string) {
-    try {
-      await invoke('tts_delete_voice', { modelsDir: ttsModelsDir, id });
-      if (ttsStoredVoiceId === id) { ttsStoredVoiceId = ''; ttsVoice = ''; }
-      await refreshVoices();
-    } catch (e) { ttsStatus = 'ошибка удаления: ' + String(e); }
   }
 
   async function refreshEngineStatus() {
@@ -520,13 +482,13 @@
               <option value={v.id}>{v.name}{v.has_avatar ? ' 🖼' : ''}</option>
             {/each}
           </select>
-          <button onclick={() => showAddVoice = !showAddVoice}>добавить голос</button>
+          <button onclick={() => activeTab = 'settings'}>управлять голосами →</button>
         </div>
 
         {#if ttsStoredVoiceId}
           <div class="row">
             <span class="status">{ttsVoice ? ttsVoice.split('\\').pop() : ''}</span>
-            <button class="small" onclick={() => deleteVoice(ttsStoredVoiceId)}>удалить</button>
+            <button class="small" onclick={() => { ttsStoredVoiceId = ''; ttsVoice = ''; }}>сбросить</button>
           </div>
         {:else}
           <div class="row">
@@ -534,30 +496,7 @@
             <span class="status">{ttsVoice ? ttsVoice.split('\\').pop() : 'не выбран'}</span>
           </div>
         {/if}
-
-        {#if showAddVoice}
-          <fieldset class="add-voice">
-            <legend>Новый голос</legend>
-            <label for="nv_name">Имя голоса:</label>
-            <input id="nv_name" bind:value={newVoiceName} placeholder="напр. Morgan Freeman" />
-            <label for="nv_audio">Референсное аудио (любой формат → WAV):</label>
-            <div class="row">
-              <button onclick={pickVoiceAudioForLib}>выбрать аудио</button>
-              <span class="status">{newVoiceAudio ? newVoiceAudio.split('\\').pop() : 'не выбрано'}</span>
-            </div>
-            <label for="nv_text">Референсный текст (опц., улучшает качество):</label>
-            <textarea id="nv_text" bind:value={newVoiceText} placeholder="что говорится в аудио"></textarea>
-            <label for="nv_avatar">Аватар (опц.):</label>
-            <div class="row">
-              <button onclick={pickVoiceAvatarForLib}>выбрать картинку</button>
-              <span class="status">{newVoiceAvatar ? newVoiceAvatar.split('\\').pop() : 'не выбрана'}</span>
-            </div>
-            <div class="row">
-              <button class="primary" onclick={submitAddVoice} disabled={addVoiceBusy}>сохранить голос</button>
-              <button onclick={() => showAddVoice = false}>отмена</button>
-            </div>
-          </fieldset>
-        {/if}
+        <p class="hint">Добавить и редактировать голоса можно в «Настройки → Хранилище голосов».</p>
       {/if}
       {#if !showNamed && !showClone && selectedPreset?.voice_type === 'ggupack'}
         <p class="hint">Голосовой GGUF-пак скачивается автоматически вместе с моделью (стандартный голос).</p>
@@ -664,6 +603,10 @@
         </div>
       {/if}
 
+      <hr />
+
+      <VoiceStorage voices={ttsVoices} modelsDir={ttsModelsDir} onChanged={refreshVoices} onUseInTts={(id) => { ttsStoredVoiceId = id; ttsVoice = id; }} />
+
       <span class="status">{ttsStatus}</span>
     </section>
 
@@ -680,6 +623,9 @@
 
 <style>
   :global(body) { font-family: system-ui, sans-serif; margin: 0; background: #1e1e2e; color: #cdd6f4; color-scheme: dark; }
+  /* Гарантируем светлый цвет всех заголовков независимо от системной темы
+     (раньше дефолтный scaffold-app.css задавал им чёрный цвет в light mode). */
+  :global(h1), :global(h2), :global(h3), :global(h4) { color: #cdd6f4; }
   main { max-width: 900px; margin: 0 auto; padding: 24px; }
   h1 { font-size: 22px; }
   .tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid #45475a; padding-bottom: 10px; }
@@ -730,7 +676,7 @@
   .status { opacity: 0.8; font-size: 14px; margin-left: 8px; }
   .hint { opacity: 0.65; font-size: 13px; margin: 4px 0 10px; }
   .hint.warn { color: #f9e2af; }
-  code { background: #313244; padding: 1px 6px; border-radius: 4px; word-break: break-all; }
+  code { background: #313244; padding: 1px 6px; border-radius: 4px; word-break: break-all; color: #cdd6f4; }
 
   .progress-wrap { height: 6px; background: #313244; border-radius: 4px; margin: 15px 0 20px; overflow: hidden; width: 100%; }
   .progress-bar { height: 100%; background: #89b4fa; transition: width 0.3s ease; }
@@ -754,10 +700,6 @@
   input[type="range"] { accent-color: #89b4fa; }
   .settings-section hr { border: none; border-top: 1px solid #45475a; margin: 16px 0; }
   .settings-section input[readonly] { opacity: 0.85; }
-  .add-voice { border: 1px solid #45475a; border-radius: 8px; padding: 12px; margin: 8px 0 12px; }
-  .add-voice legend { opacity: 0.8; padding: 0 6px; }
-  .add-voice label { margin-top: 8px; }
-  .add-voice textarea { width: 100%; box-sizing: border-box; min-height: 60px; background: #1e1e2e; color: #a6adc8; border: 1px solid #45475a; border-radius: 8px; padding: 8px; resize: vertical; font-family: system-ui, sans-serif; }
   .models { list-style: none; padding: 0; margin: 0; }
   .models li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px; background: #313244; border-radius: 6px; margin-bottom: 4px; }
   .mname { font-size: 13px; }

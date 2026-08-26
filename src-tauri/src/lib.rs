@@ -473,6 +473,29 @@ async fn tts_delete_voice(models_dir: String, id: String) -> Result<(), String> 
 }
 
 #[tauri::command]
+async fn tts_update_voice(
+    app: AppHandle,
+    models_dir: String,
+    id: String,
+    name: String,
+    ref_text: String,
+    avatar: String,
+    src_audio: String,
+) -> Result<modules::tts::voices::VoiceInfo, String> {
+    modules::tts::voices::update_voice(&app, &models_dir, &id, &name, &ref_text, &avatar, &src_audio)
+}
+
+#[tauri::command]
+async fn tts_voice_avatar(models_dir: String, id: String) -> Option<Vec<u8>> {
+    modules::tts::voices::voice_avatar(&models_dir, &id)
+}
+
+#[tauri::command]
+async fn tts_voice_audio(models_dir: String, id: String) -> Result<Vec<u8>, String> {
+    modules::tts::voices::voice_audio(&models_dir, &id)
+}
+
+#[tauri::command]
 async fn tts_check_update(app: AppHandle) -> Value {
     let settings = load_tts_settings(&app);
     match download::engine_backends().await {
@@ -551,6 +574,9 @@ pub fn run() {
             tts_list_voices,
             tts_add_voice,
             tts_delete_voice,
+            tts_update_voice,
+            tts_voice_avatar,
+            tts_voice_audio,
             tts_check_update,
             tts_default_dirs,
             tts_get_settings,

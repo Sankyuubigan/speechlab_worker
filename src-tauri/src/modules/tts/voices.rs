@@ -306,6 +306,105 @@ pub fn delete_voice(models_dir: &str, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Обновляет метаданные и (опц.) референсное аудио/аватар существующего голоса.
+///
+/// `id` остаётся стабильным (важно для регистрации голоса в сервере CrispASR по
+/// `ascii_voice_name(id)`). Меняются только отображаемые поля:
+/// - `name`/`ref_text` перезаписывают манифест `<id>.json`;
+/// - `src_audio` — если непустой и файл существует, перекодируется в моно-WAV и
+///   перезаписывает `<id>.wav` + `<id>.txt` (замена референса клонирования);
+/// - `avatar` — если `"__REMOVE__"` → удаляет `<id>.avatar.jpg`; если непустой и
+///   это картинка → заменяет; иначе остаётся без изменений.
+pub fn update_voice(
+    app: &tauri::AppHandle,
+    models_dir: &str,
+    id: &str,
+    name: &str,
+    ref_text: &str,
+    avatar: &str,
+    src_audio: &str,
+) -> Result<VoiceInfo, String> {
+    let root = voices_root(models_dir);
+    let wav = root.join(format!("{id}.wav"));
+    if !wav.exists() {
+        return Err(format!("голос не найден: {id}"));
+    }
+
+    // Референсное аудио (опц.) — перезапись.
+    if !src_audio.trim().is_empty() {
+        if !std::path::Path::new(src_audio).exists() {
+            return Err(format!("файл аудио не найден: {src_audio}"));
+        }
+        crate::modules::log::app_log(app, &format!("[voices] перекодирую «{name}» в WAV..."));
+        let (mono, rate) = crate::modules::audio::decode_to_mono(src_audio)
+            .map_err(|e| format!("не удалось декодировать аудио «{src_audio}»: {e}"))?;
+        if mono.is_empty() {
+            return Err("декодированное аудио пустое (тишина?)".into());
+        }
+        wav::write_wav(&wav.to_string_lossy(), &mono, rate)
+            .map_err(|e| format!("не удалось записать WAV: {e}"))?;
+        let _ = std::fs::write(root.join(format!("{id}.txt")), ref_text.trim());
+    }
+
+    // Аватар.
+    let mut has_avatar = root.join(format!("{id}.avatar.jpg")).exists();
+    if avatar == "__REMOVE__" {
+        let _ = std::fs::remove_file(root.join(format!("{id}.avatar.jpg")));
+        has_avatar = false;
+    } else if !avatar.trim().is_empty() && std::path::Path::new(avatar).exists() {
+        let ext = std::path::Path::new(avatar)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+            let _ = std::fs::copy(avatar, root.join(format!("{id}.avatar.jpg")));
+            has_avatar = true;
+        }
+    }
+
+    // Сохраняем оригинальное время создания (из старого манифеста, если есть).
+    let prev_created = root
+        .join(format!("{id}.json"))
+        .as_path()
+        .exists()
+        .then(|| {
+            std::fs::read_to_string(root.join(format!("{id}.json")))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| v["created_at"].as_str().map(|s| s.to_string()))
+        })
+        .flatten()
+        .unwrap_or_else(chrono_now);
+
+    let manifest = serde_json::json!({
+        "id": id,
+        "name": name,
+        "ref_text": ref_text.trim(),
+        "has_avatar": has_avatar,
+        "created_at": prev_created,
+    });
+    let _ = std::fs::write(
+        root.join(format!("{id}.json")),
+        serde_json::to_string_pretty(&manifest).unwrap_or_default(),
+    );
+
+    crate::modules::log::app_log(app, &format!("[voices] голос «{name}» обновлён ({id})"));
+    read_voice(&root, id).ok_or_else(|| format!("не удалось прочитать обновлённый голос: {id}"))
+}
+
+/// Возвращает байты аватара `<id>.avatar.jpg` (JPEG) либо `None`, если его нет.
+pub fn voice_avatar(models_dir: &str, id: &str) -> Option<Vec<u8>> {
+    let p = voices_root(models_dir).join(format!("{id}.avatar.jpg"));
+    std::fs::read(p).ok()
+}
+
+/// Возвращает байты референсного WAV `<id>.wav` для проигрывания превью.
+pub fn voice_audio(models_dir: &str, id: &str) -> Result<Vec<u8>, String> {
+    let p = voices_root(models_dir).join(format!("{id}.wav"));
+    std::fs::read(&p).map_err(|e| format!("не удалось прочитать аудио голоса {id}: {e}"))
+}
+
 /// RFC3339-подобное UTC-время (без внешних зависимостей — через std::time).
 fn chrono_now() -> String {
     let secs = std::time::SystemTime::now()
