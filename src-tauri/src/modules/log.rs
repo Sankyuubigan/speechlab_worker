@@ -1,8 +1,15 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter};
+
+/// Сериализует запись в `last_logs`: в файл пишут два потока одновременно
+/// (stderr-поток движка и основной поток ошибок), и без блокировки их записи
+/// перемешивались, терялся `\n` и строки склеивались (файл выглядел
+/// «не текстовым»). Мьютекс гарантирует атомарность каждой строки.
+static LOG_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Вычисляет путь к файлу `test/last_logs`.
 ///
@@ -44,17 +51,28 @@ pub fn truncate_last_logs() {
     let _ = std::fs::write(&path, "");
 }
 
+/// Метка времени события для каждой строки лога.
+///
+/// Формат `ГГГГ-ММ-ДД ЧЧ:ММ:СС` (локальное время через `chrono`, если доступно;
+/// см. Cargo.toml). Единая точка простановки времени — гарантирует идентичный
+/// тайминг в файле `last_logs` и во вкладке «Логи» UI (SSOT, core rules §2.5.1).
+fn timestamp() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 /// Единая точка записи логов (требование global core rules §2.5.1):
-/// stderr + UI-событие `app-log` + файл `test/last_logs`.
+/// метка времени + stderr + UI-событие `app-log` + файл `test/last_logs`.
 pub fn app_log(app: &AppHandle, msg: &str) {
-    eprintln!("{msg}");
-    let _ = app.emit("app-log", msg);
-    if let Err(e) = write_to_file(msg) {
+    let line = format!("[{}] {}", timestamp(), msg);
+    eprintln!("{line}");
+    let _ = app.emit("app-log", line.clone());
+    if let Err(e) = write_to_file(&line) {
         eprintln!("[logger] не удалось записать last_logs: {e}");
     }
 }
 
 fn write_to_file(msg: &str) -> std::io::Result<()> {
+    let _guard = LOG_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let path = last_logs_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();

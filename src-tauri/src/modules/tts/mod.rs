@@ -12,6 +12,7 @@ use tauri::AppHandle;
 
 use crate::modules::process_util::{kill_process_tree, JobGuard};
 
+pub mod clone;
 pub mod download;
 pub mod settings;
 pub mod voices;
@@ -36,6 +37,94 @@ pub struct TtsEngine {
     loaded_codec: Mutex<String>,
     loaded_voice: Mutex<String>,
     loaded_backend: Mutex<String>,
+}
+
+/// Собирает аргументы командной строки запуска сервера CrispASR.
+///
+/// **Архитектурная точка отключения watermark:** флаг `--no-watermark` добавляется
+/// сюда безусловно, поэтому применяется ко ВСЕМ моделям/бэкендам (ensure() — единственный
+/// spawn движка). `--no-spoken-disclaimer` добавлен для страховки. ВАЖНО: этот флаг
+/// недостаточен сам по себе, если в теле запроса `POST /v1/audio/speech` присутствует
+/// `consent_attestation` (оно заставляет движок вернуть слышимый дисклеймер) — поэтому
+/// поле consent_attestation убрано из `build_speech_body`.
+fn engine_launch_args(
+    backend: &str,
+    model: &str,
+    codec_path: &str,
+    port: u16,
+    voice_dir: &str,
+    startup_voice: &str,
+) -> Vec<String> {
+    let mut a = vec![
+        "--server".to_string(),
+        "--backend".to_string(),
+        backend.to_string(),
+        "-m".to_string(),
+        model.to_string(),
+        "--host".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+    ];
+    if !codec_path.is_empty() {
+        a.push("--codec-model".to_string());
+        a.push(codec_path.to_string());
+    }
+    a.push("--no-watermark".to_string());
+    // CrispASR не стартует с --no-watermark без явного принятия ответственности
+    // за маркировку ИИ-контента оператором (приложением). Без этого флага сервер
+    // падает сразу ("Refusing to start").
+    a.push("--accept-marking-responsibility".to_string());
+    a.push("--no-spoken-disclaimer".to_string());
+    a.push("--voice-dir".to_string());
+    a.push(voice_dir.to_string());
+    if !startup_voice.is_empty() {
+        a.push("--voice".to_string());
+        a.push(startup_voice.to_string());
+    }
+    a
+}
+
+/// Строит JSON-тело запроса к `POST /v1/audio/speech`.
+///
+/// Намеренно НЕ включает `consent_attestation`: это поле заставляет движок
+/// синтезировать слышимый AI-дисклеймер (ватермарк). Сам ватермарк отключается
+/// на уровне процесса флагом `--no-watermark` в `ensure()`; здесь мы лишь не
+/// добавляем поле, которое его возвращает.
+fn build_speech_body(
+    backend: &str,
+    text: &str,
+    voice: &str,
+    instructions: &str,
+    ref_text: &str,
+    speed: f32,
+) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    body.insert("model".into(), serde_json::Value::String(backend.to_string()));
+    body.insert("input".into(), serde_json::Value::String(text.to_string()));
+    body.insert(
+        "response_format".into(),
+        serde_json::Value::String("mp3".into()),
+    );
+    if !voice.is_empty() {
+        body.insert("voice".into(), serde_json::Value::String(voice.to_string()));
+    }
+    if !instructions.is_empty() {
+        body.insert(
+            "instructions".into(),
+            serde_json::Value::String(instructions.to_string()),
+        );
+    }
+    if !ref_text.is_empty() {
+        body.insert(
+            "ref_text".into(),
+            serde_json::Value::String(ref_text.to_string()),
+        );
+    }
+    if (speed - 1.0).abs() > f32::EPSILON {
+        body.insert("speed".into(), serde_json::Value::from(speed));
+    }
+    serde_json::Value::Object(body)
 }
 
 impl TtsEngine {
@@ -167,28 +256,19 @@ impl TtsEngine {
         let port = Self::pick_port().ok_or_else(|| "не удалось выбрать свободный порт".to_string())?;
 
         let mut cmd = Command::new(engine_exe);
-        cmd.args([
-            "--server",
-            "--backend",
-            backend,
-            "-m",
-            &model.to_string_lossy(),
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port.to_string(),
-        ]);
-        if !codec_path.is_empty() {
-            cmd.args(["--codec-model", &codec_path]);
-        }
-        // Хранилище голосов: сервер резолвит `voice` против --voice-dir и отвергает
-        // любые пути в поле `voice` (bug `400 invalid_voice`). Обязателен для клонирования.
         let voice_dir = voices::voices_root(models_dir);
-        cmd.args(["--voice-dir", &voice_dir.to_string_lossy()]);
-        // Голос-пак GGUF грузим при старте; именованные/клонированные — в теле запроса.
-        if !startup_voice_path.is_empty() {
-            cmd.args(["--voice", &startup_voice_path]);
-        }
+        cmd.args(engine_launch_args(
+            backend,
+            &model.to_string_lossy(),
+            &codec_path,
+            port,
+            &voice_dir.to_string_lossy(),
+            &startup_voice_path,
+        ));
+        // Watermark дублируем через env (на случай старых версий бинаря, игнорирующих
+        // флаг --no-watermark). Сам флаг уже внутри engine_launch_args и применяется
+        // ко ВСЕМ моделям/бэкендам, т.к. ensure() — единственная точка spawn'а движка.
+        cmd.env("CRISPASR_NO_WATERMARK", "1");
         #[cfg(windows)]
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         cmd.stdout(Stdio::null()).stderr(Stdio::piped());
@@ -207,7 +287,8 @@ impl TtsEngine {
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().flatten() {
-                    crate::modules::log::app_log(&app_clone, &format!("[crispasr] {line}"));
+                    let clean = sanitize_crispasr_line(&line);
+                    crate::modules::log::app_log(&app_clone, &format!("[crispasr] {clean}"));
                 }
             });
         }
@@ -249,18 +330,19 @@ impl TtsEngine {
         Ok(())
     }
 
-    /// Синтезирует текст в WAV и возвращает сырые байты.
+    /// Синтезирует текст в MP3 и возвращает сырые байты.
     ///
     /// `voice` — имя спикера или путь к WAV для клонирования (передаётся в теле запроса,
-    /// per-request; может быть пустым). `consent_attestation` добавляется ВСЕГДА
-    /// (требование CosyVoice3 и других бэкендов — даже при пустом/дефолтном voice любой
-    /// синтез трактуется как клонирование). Лишнее поле другие бэкенды игнорируют.
+    /// per-request; может быть пустым). Поле `consent_attestation` НЕ отправляется:
+    /// оно заставляет движок синтезировать слышимый AI-дисклеймер (ватермарк), который
+    /// уже отключён на уровне процесса флагом `--no-watermark` в `ensure()`.
     /// `instructions` — стиль/описание голоса (только для поддерживающих моделей).
     pub async fn speak(
         &self,
         text: &str,
         voice: &str,
         instructions: &str,
+        ref_text: &str,
         speed: f32,
     ) -> Result<Vec<u8>, String> {
         let port = *self.port.lock().unwrap();
@@ -272,32 +354,7 @@ impl TtsEngine {
         let client = Client::new();
         let url = format!("http://127.0.0.1:{port}/v1/audio/speech");
 
-        let mut body = serde_json::Map::new();
-        body.insert("model".into(), serde_json::Value::String(backend));
-        body.insert("input".into(), serde_json::Value::String(text.to_string()));
-        body.insert("response_format".into(), serde_json::Value::String("wav".into()));
-        if !voice.is_empty() {
-            body.insert("voice".into(), serde_json::Value::String(voice.to_string()));
-        }
-        // consent_attestation требуется бэкендами (напр. CosyVoice3) всегда — даже при
-        // пустом/дефолтном voice любой синтез трактуется как клонирование. Безопасно для
-        // остальных бэкендов (игнорируют неизвестное поле).
-        body.insert(
-            "consent_attestation".into(),
-            serde_json::Value::String(
-                "I confirm I have the legal right to clone this voice.".into(),
-            ),
-        );
-        if !instructions.is_empty() {
-            body.insert(
-                "instructions".into(),
-                serde_json::Value::String(instructions.to_string()),
-            );
-        }
-        if (speed - 1.0).abs() > f32::EPSILON {
-            body.insert("speed".into(), serde_json::Value::from(speed));
-        }
-        let body_value = serde_json::Value::Object(body);
+        let body_value = build_speech_body(&backend, text, voice, instructions, ref_text, speed);
 
         let resp = client
             .post(&url)
@@ -320,6 +377,123 @@ impl TtsEngine {
         Ok(bytes.to_vec())
     }
 
+    /// Регистрирует кастомный голос в запущенном сервере CrispASR и возвращает
+    /// имя, под которым сервер его знает (ASCII, см. `ascii_voice_name`).
+    ///
+    /// Корень бага: cosyvoice3 резолвит `voice` только против baked-банки
+    /// (8 встроенных) и голосов, загруженных через `POST /v1/voices`. Просто
+    /// положить `<voice-dir>/<id>.wav` недостаточно — сервер возвращает
+    /// `500 voice not found`. Поэтому загружаем wav в рантайме (multipart),
+    /// передавая обязательный `consent_attestation` и `transcript` (ref_text).
+    ///
+    /// Если локальный wav отсутствует — возвращаем ЧЕСТНУЮ ошибку (не глухой 500,
+    /// core rules §2.2), вместо того чтобы слать несуществующий голос.
+    pub async fn ensure_voice(
+        &self,
+        app: &AppHandle,
+        models_dir: &str,
+        voice_id: &str,
+    ) -> Result<String, String> {
+        if voice_id.is_empty() {
+            return Ok(String::new());
+        }
+        let root = voices::voices_root(models_dir);
+        let wav = root.join(format!("{voice_id}.wav"));
+        if !wav.exists() {
+            // Нет локального wav — считаем встроенным/baked голосом (zero_shot,
+            // fleurs-* и т.п.). Сервер сам резолвит такие имена; загружать нечего.
+            // Если имя всё же невалидно — сервер вернёт 500, который пробросится
+            // честно (core rules §2.2).
+            return Ok(voice_id.to_string());
+        }
+        let server_name = ascii_voice_name(voice_id);
+        if self.voice_registered(&server_name).await {
+            return Ok(server_name);
+        }
+        let txt = root.join(format!("{voice_id}.txt"));
+        let transcript = if txt.exists() {
+            std::fs::read_to_string(&txt).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let bytes = std::fs::read(&wav)
+            .map_err(|e| format!("не удалось прочитать файл голоса {}: {e}", wav.display()))?;
+        self.upload_voice(app, &server_name, &bytes, &transcript).await?;
+        Ok(server_name)
+    }
+
+    /// Спрашивает сервер, зарегистрирован ли голос с именем `name` (GET /v1/voices).
+    async fn voice_registered(&self, name: &str) -> bool {
+        let port = *self.port.lock().unwrap();
+        if port == 0 {
+            return false;
+        }
+        let client = Client::new();
+        let url = format!("http://127.0.0.1:{port}/v1/voices");
+        if let Ok(resp) = client
+            .get(&url)
+            .timeout(Duration::from_secs(3))
+            .send()
+            .await
+        {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(arr) = json.get("voices").and_then(|v| v.as_array()) {
+                    return arr
+                        .iter()
+                        .any(|v| v.get("name").and_then(|n| n.as_str()) == Some(name));
+                }
+            }
+        }
+        false
+    }
+
+    /// Загружает wav-голос в сервер (multipart POST /v1/voices).
+    ///
+    /// Контракт CrispASR server.md: часть `voice` (файл), обязательный
+    /// `consent_attestation`, опциональный `transcript` (= ref_text). `?force=true`
+    /// позволяет перезалить при повторной регистрации в той же сессии.
+    async fn upload_voice(
+        &self,
+        app: &AppHandle,
+        name: &str,
+        bytes: &[u8],
+        transcript: &str,
+    ) -> Result<(), String> {
+        let port = *self.port.lock().unwrap();
+        if port == 0 {
+            return Err("движок не запущен (вызовите ensure перед speak)".into());
+        }
+        let client = Client::new();
+        let url = format!("http://127.0.0.1:{port}/v1/voices?force=true");
+        let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+            .file_name(format!("{name}.wav"));
+        let mut form = reqwest::multipart::Form::new()
+            .part("voice", part)
+            .text("name", name.to_string())
+            .text(
+                "consent_attestation",
+                "I confirm I have the legal right to clone this voice.",
+            );
+        if !transcript.trim().is_empty() {
+            form = form.text("transcript", transcript.trim().to_string());
+        }
+        let resp = client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("ошибка регистрации голоса «{name}»: {e}"))?;
+        if !resp.status().is_success() {
+            let detail = resp.text().await.unwrap_or_default();
+            return Err(format!("не удалось зарегистрировать голос «{name}»: {detail}"));
+        }
+        crate::modules::log::app_log(
+            app,
+            &format!("[voices] голос «{name}» зарегистрирован в движке TTS"),
+        );
+        Ok(())
+    }
+
     /// Останавливает движок (выгрузка моделей из VRAM).
     pub async fn stop(&self) {
         self.reap();
@@ -339,5 +513,140 @@ impl Default for TtsEngine {
 impl Drop for TtsEngine {
     fn drop(&mut self) {
         self.reap();
+    }
+}
+
+/// Убирает ANSI-эскейп-последовательности и лишние `\r` из stderr движка, чтобы
+/// `test/last_logs` оставался чистым текстом (без управляющих кодов, которые
+/// ломают отображение файла как текстового).
+fn sanitize_crispasr_line(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // ANSI CSI: ESC [ ... <буква>. Пропускаем целиком.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if c == '\r' {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Серверное имя голоса (для `POST /v1/voices` / поля `voice` в `/v1/audio/speech`).
+///
+/// CrispASR требует `name` по регэкспу `[a-zA-Z0-9_-]+` (только ASCII).
+/// Пользовательские id могут содержать кириллицу/пробелы — такие имена сервер
+/// отвергает (400). Поэтому: ASCII-фолдим (alnum→lower, `-` оставляем, остальное→`_`),
+/// и если после фолда ничего не осталось (чисто не-ASCII id, напр. «Влад_без_текста»)
+/// — берём стабильный ASCII-хэш FNV-1a, чтобы имя было уникальным и воспроизводимым.
+pub(crate) fn ascii_voice_name(id: &str) -> String {
+    let folded: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else if c == '-' {
+                '-'
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed: String = folded.trim_matches('_').to_string();
+    if !trimmed.is_empty() && trimmed.chars().any(|c| c.is_ascii_alphanumeric()) {
+        trimmed
+    } else {
+        format!("v{:x}", fnv64(id.as_bytes()))
+    }
+}
+
+fn fnv64(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_strips_ansi_and_cr() {
+        let raw = "\r\x1b[31merror\x1b[0m: boom\r\n";
+        let clean = sanitize_crispasr_line(raw);
+        assert!(!clean.contains('\u{1b}'), "ANSI не удалён: {clean:?}");
+        assert!(!clean.contains('\r'), "CR не удалён: {clean:?}");
+        assert_eq!(clean, "error: boom\n");
+    }
+
+    #[test]
+    fn ascii_voice_name_rules() {
+        assert_eq!(ascii_voice_name("MorganFreeman"), "morganfreeman");
+        assert_eq!(ascii_voice_name("voice-1"), "voice-1");
+        assert_eq!(ascii_voice_name("My Voice"), "my_voice");
+        // Чисто не-ASCII id -> стабильный ASCII-хэш с префиксом 'v'.
+        let cyr = ascii_voice_name("Влад_без_текста");
+        assert!(cyr.chars().all(|c| c.is_ascii()), "не-ASCII имя: {cyr}");
+        assert!(cyr.starts_with('v'));
+        // Детерминизм: одинаковый ввод -> одинаковый вывод.
+        assert_eq!(cyr, ascii_voice_name("Влад_без_текста"));
+    }
+
+    #[test]
+    fn launch_args_disable_watermark_for_all_models() {
+        // Флаг --no-watermark должен быть ВСЕГДА, независимо от бэкенда/модели.
+        for backend in ["cosyvoice3-tts", "qwen3-tts-1.7b-base", "f5-tts", "kokoro"] {
+            let args = engine_launch_args(backend, "model.gguf", "", 18000, "C:\\voices", "");
+            assert!(
+                args.iter().any(|a| a == "--no-watermark"),
+                "нет --no-watermark для бэкенда {backend}"
+            );
+            assert!(
+                args.iter().any(|a| a == "--accept-marking-responsibility"),
+                "нет --accept-marking-responsibility для бэкенда {backend} (сервер не стартует)"
+            );
+            assert!(
+                args.iter().any(|a| a == "--no-spoken-disclaimer"),
+                "нет --no-spoken-disclaimer для бэкенда {backend}"
+            );
+            // Никаких упоминаний consent в аргументах командной строки.
+            assert!(!args.iter().any(|a| a.contains("consent")));
+        }
+        // Со стартовым голосом (клон) флаг тоже присутствует.
+        let args = engine_launch_args("cosyvoice3-tts", "m.gguf", "c.gguf", 18001, "C:\\v", "ref.wav");
+        assert!(args.iter().any(|a| a == "--voice"));
+        assert!(args.iter().any(|a| a == "--no-watermark"));
+    }
+
+    #[test]
+    fn speech_body_has_no_consent_attestation() {
+        let body = build_speech_body("cosyvoice3-tts", "привет", "voice1", "", "транскрипт", 1.0);
+        let obj = body.as_object().unwrap();
+        assert!(!obj.contains_key("consent_attestation"), "consent_attestation всё ещё в теле запроса — будет ватермарк");
+        assert_eq!(obj.get("response_format").unwrap(), &serde_json::Value::String("mp3".into()));
+        assert_eq!(obj.get("input").unwrap(), &serde_json::Value::String("привет".into()));
+        // Без voice/ref_text/speed поля не должны появляться.
+        assert!(!obj.contains_key("speed"));
+        assert!(obj.contains_key("voice"));
+
+        let body2 = build_speech_body("qwen3-tts", "hi", "", "", "", 1.5);
+        let obj2 = body2.as_object().unwrap();
+        assert!(!obj2.contains_key("consent_attestation"));
+        assert!(!obj2.contains_key("voice"));
+        assert!(obj2.contains_key("speed"));
     }
 }

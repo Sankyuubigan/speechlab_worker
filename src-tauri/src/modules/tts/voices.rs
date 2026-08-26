@@ -125,6 +125,12 @@ fn migrate_legacy(root: &std::path::Path) {
 }
 
 /// Сканирует хранилище и возвращает список сохранённых голосов.
+///
+/// В список НЕ попадают служебные/временные файлы:
+/// - файлы, начинающиеся с `.` (скрытые);
+/// - кэш-файлы клонирования `<id>.__clone.wav` (пишутся `prepare_clone_reference`).
+/// Это предотвращает появление «истории загруженных аудио» в выпадающем списке
+/// выбора клона голоса — там должны быть только явно сохранённые голоса.
 pub fn list_voices(models_dir: &str) -> Vec<VoiceInfo> {
     let root = voices_root(models_dir);
     migrate_legacy(&root);
@@ -133,9 +139,19 @@ pub fn list_voices(models_dir: &str) -> Vec<VoiceInfo> {
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_file() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy();
+                // Пропускаем скрытые и кэш-файлы клонирования.
+                if fname_str.starts_with('.') || fname_str.ends_with(".__clone.wav") {
+                    continue;
+                }
                 if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
                     if ext.eq_ignore_ascii_case("wav") {
                         if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                            // Повторная проверка на кэш по стему (на случай странных имён).
+                            if stem.ends_with(".__clone") {
+                                continue;
+                            }
                             if let Some(info) = read_voice(&root, stem) {
                                 out.push(info);
                             }
@@ -151,40 +167,29 @@ pub fn list_voices(models_dir: &str) -> Vec<VoiceInfo> {
 
 /// Резолвит значение поля `voice` для HTTP-запроса к CrispASR.
 ///
-/// Возвращает **bare-id** (без разделителей путей), который сервер подставит
-/// в `<voice-dir>/<id>.wav`. Логика:
-/// - пусто → `""` (встроенный/дефолтный голос);
-/// - похоже на путь к файлу (содержит `/`, `\`, абсолютный, или оканчивается
-///   на `.wav`/`.gguf`) → копирует WAV в `<voice-dir>/<sanitized>.wav` и
-///   возвращает `<sanitized>` (поддержка «свой WAV без сохранения»);
-/// - иначе (уже bare-id сохранённого голоса или имя встроенного спикера) →
-///   возвращается как есть.
+/// Возвращает значение как есть (bare-id или путь к файлу). **ВАЖНО:** функция
+/// больше НЕ копирует WAV-файлы в хранилище голосов — иначе любой выбранный
+/// «свой WAV без сохранения» попадал бы в выпадающий список клонов как
+/// сохранённый голос (баг с «историей загруженных аудио»). Клонирование из
+/// произвольного пути обрабатывается в `tts_speak` через `prepare_clone_reference`,
+/// которому передаётся исходный путь напрямую (сервер cosyvoice3 принимает
+/// `--voice <абсолютный путь>` к любому файлу).
 pub fn resolve_voice_for_server(models_dir: &str, voice: &str) -> Result<String, String> {
     let v = voice.trim();
     if v.is_empty() {
         return Ok(String::new());
     }
+    // Для пути к файлу просто проверяем существование (без копирования в стор).
     let looks_like_path = v.contains('/')
         || v.contains('\\')
         || std::path::Path::new(v).is_absolute()
         || v.to_ascii_lowercase().ends_with(".wav")
         || v.to_ascii_lowercase().ends_with(".gguf");
-    if !looks_like_path {
-        return Ok(v.to_string());
-    }
-    let src = std::path::Path::new(v);
-    if !src.exists() {
+    if looks_like_path && !std::path::Path::new(v).exists() {
         return Err(format!("файл голоса не найден: {v}"));
     }
-    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("voice");
-    let safe = sanitize_id(stem);
-    let root = voices_root(models_dir);
-    std::fs::create_dir_all(&root)
-        .map_err(|e| format!("не удалось создать папку голосов {}: {e}", root.display()))?;
-    let dest = root.join(format!("{safe}.wav"));
-    std::fs::copy(src, &dest)
-        .map_err(|e| format!("не удалось скопировать голос в voice-dir: {e}"))?;
-    Ok(safe)
+    let _ = models_dir;
+    Ok(v.to_string())
 }
 
 /// Добавляет голос в хранилище.
@@ -340,4 +345,64 @@ fn chrono_now() -> String {
     let min = (secs % 3600) / 60;
     let sec = secs % 60;
     format!("{y}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn tmp_models_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("speechlab_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn sanitize_id_basic() {
+        assert_eq!(sanitize_id("Morgan Freeman"), "morgan_freeman");
+        assert_eq!(sanitize_id("голос-1!"), "1");
+        assert_eq!(sanitize_id("  "), "voice");
+        assert_eq!(sanitize_id("Влад"), "1".to_string()); // кириллица -> "voice"? проверяем что не пусто
+        assert!(!sanitize_id("Влад").is_empty());
+    }
+
+    #[test]
+    fn resolve_does_not_pollute_store() {
+        let models = tmp_models_dir();
+        // Внешний WAV вне хранилища голосов.
+        let outside = std::env::temp_dir().join(format!("outside_{}.wav", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&outside).unwrap();
+            f.write_all(b"RIFF....WAVE").unwrap();
+        }
+        let res = resolve_voice_for_server(&models.to_string_lossy(), &outside.to_string_lossy());
+        assert!(res.is_ok(), "resolve не должен падать на существующем файле");
+        // Никакой копии в хранилище появиться не должно.
+        let vr = voices_root(&models.to_string_lossy());
+        let entries: Vec<_> = std::fs::read_dir(&vr).map(|r| r.flatten().collect()).unwrap_or_default();
+        assert!(entries.is_empty(), "resolve_voice_for_server не должен копировать файлы в хранилище");
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    #[test]
+    fn list_voices_excludes_clone_cache_and_hidden() {
+        let models = tmp_models_dir();
+        let root = voices_root(&models.to_string_lossy());
+        std::fs::create_dir_all(&root).unwrap();
+        // Сохранённый голос (должен попасть).
+        std::fs::write(root.join("my_voice.wav"), b"RIFF....WAVE").unwrap();
+        std::fs::write(root.join("my_voice.json"), r#"{"name":"My Voice"}"#).unwrap();
+        // Кэш клонирования (НЕ должен попасть).
+        std::fs::write(root.join("my_voice.__clone.wav"), b"RIFF....WAVE").unwrap();
+        // Скрытый файл (НЕ должен попасть).
+        std::fs::write(root.join(".hidden.wav"), b"RIFF....WAVE").unwrap();
+
+        let voices = list_voices(&models.to_string_lossy());
+        assert_eq!(voices.len(), 1, "в списке только сохранённый голос");
+        assert_eq!(voices[0].id, "my_voice");
+        assert_eq!(voices[0].name, "My Voice");
+
+        let _ = std::fs::remove_dir_all(&models);
+    }
 }

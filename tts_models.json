@@ -187,5 +187,28 @@
     "supports_instruct": false,
     "supports_russian": true,
     "size": "5.3 GB"
+  },
+  {
+    "id": "confucius4-tts",
+    "label": "Confucius4-TTS (клонирование WAV, 14 яз., RU)",
+    "backend": "confucius4-tts",
+    "model_file": "confucius4-tts-t2s-q4_k.gguf",
+    "model_url": "https://huggingface.co/cstr/confucius4-tts-GGUF/resolve/main/confucius4-tts-t2s-q4_k.gguf",
+    "codec": [
+      "confucius4-tts-s2a-q4_k.gguf",
+      "https://huggingface.co/cstr/confucius4-tts-GGUF/resolve/main/confucius4-tts-s2a-q4_k.gguf"
+    ],
+    "voice": null,
+    "extras": [
+      [
+        "confucius4-tts-bigvgan-22k-f16.gguf",
+        "https://huggingface.co/cstr/confucius4-tts-GGUF/resolve/main/confucius4-tts-bigvgan-22k-f16.gguf"
+      ]
+    ],
+    "voice_type": "clone",
+    "builtin_voices": [],
+    "supports_instruct": false,
+    "supports_russian": true,
+    "size": "725 MB"
   }
 ]

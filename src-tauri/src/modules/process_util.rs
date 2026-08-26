@@ -15,6 +15,9 @@
 
 use std::process::Child;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 /// Принудительно убивает ВСЁ дерево процессов (родитель + все потомки).
 ///
 /// Порядок критичен: сначала `taskkill /F /T /PID <pid>` убивает дерево атомарно,
@@ -25,11 +28,12 @@ pub fn kill_process_tree(child: &mut Child) {
     #[cfg(windows)]
     {
         let pid = child.id();
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/T", "/PID", &pid.to_string()])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+            .stderr(std::process::Stdio::null());
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW — без всплывающего чёрного окна
+        let _ = cmd.status();
     }
     // Fallback / non-Windows: убиваем самого ребёнка напрямую.
     let _ = child.kill();
@@ -43,11 +47,12 @@ pub fn kill_process_tree(child: &mut Child) {
 pub fn kill_active_engines() {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/IM", "crispasr.exe"])
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/IM", "crispasr.exe"])
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+            .stderr(std::process::Stdio::null());
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW — без всплывающего чёрного окна
+        let _ = cmd.status();
     }
     #[cfg(not(windows))]
     {
@@ -88,7 +93,7 @@ impl JobGuard {
                 return None;
             }
 
-            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+            let info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
                 BasicLimitInformation: JOBOBJECT_BASIC_LIMIT_INFORMATION {
                     PerProcessUserTimeLimit: 0,
                     PerJobUserTimeLimit: 0,

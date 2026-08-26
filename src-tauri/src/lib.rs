@@ -1,7 +1,9 @@
 mod modules;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tauri::{AppHandle, State};
 use serde_json::{json, Value};
@@ -150,6 +152,29 @@ async fn recognize(app: AppHandle, state: State<'_, AppState>, paths: Vec<String
     Ok(results)
 }
 
+/// Результат синтеза: WAV-байты + время генерации (сек) для отображения в UI.
+#[derive(serde::Serialize)]
+struct TtsSpeakResult {
+    wav: Vec<u8>,
+    seconds: f64,
+}
+
+/// Длительность WAV в секундах по заголовку (приблизительно, игнорируем вложенные
+/// чанки). Нужна для оценки скорости синтеза (RTF) в логах.
+fn wav_duration_secs(wav: &[u8]) -> Option<f64> {
+    if wav.len() < 44 {
+        return None;
+    }
+    let sr = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]) as f64;
+    let ch = u16::from_le_bytes([wav[22], wav[23]]) as f64;
+    let bits = u16::from_le_bytes([wav[34], wav[35]]) as f64;
+    if sr <= 0.0 || ch <= 0.0 || bits <= 0.0 {
+        return None;
+    }
+    let data_bytes = (wav.len() - 44) as f64;
+    Some(data_bytes / (sr * ch * (bits / 8.0)))
+}
+
 #[tauri::command]
 async fn tts_speak(
     app: AppHandle,
@@ -159,7 +184,8 @@ async fn tts_speak(
     instruct: String,
     speed: f32,
     text: String,
-) -> Result<Vec<u8>, String> {
+) -> Result<TtsSpeakResult, String> {
+    let start = Instant::now();
     let settings = load_tts_settings(&app);
     let backend_id = if settings.engine_backend.is_empty() {
         "cpu".to_string()
@@ -178,7 +204,55 @@ async fn tts_speak(
         .unwrap_or_else(|| "none".to_string());
     let supports_instruct = preset_def.map(|p| p.supports_instruct).unwrap_or(false);
 
-    // Голос-пак GGUF грузим при старте сервера; именованный/WAV — в теле запроса.
+    let backend_clone = crate::modules::tts::clone::clone_reference_limits(&backend).is_some();
+    let mut clone_ref_text = String::new();
+
+    // Резолвим `voice` в одну из ситуаций (без копирования файлов в хранилище):
+    //  - путь к WAV/GGUF-файлу → клонируем из этого файла напрямую;
+    //  - bare-id, у которого есть <voice-dir>/<id>.wav → клонируем из хранилища
+    //    (только для backend-ов, умеющих клонировать из WAV, иначе это
+    //    зарегистрированный именованный голос);
+    //  - bare-id без файла (встроенный/baked спикер) → шлём имя в теле запроса.
+    let voice_input = voice.trim();
+    let looks_path = !voice_input.is_empty()
+        && (voice_input.contains('/')
+            || voice_input.contains('\\')
+            || Path::new(voice_input).is_absolute()
+            || voice_input.to_ascii_lowercase().ends_with(".wav")
+            || voice_input.to_ascii_lowercase().ends_with(".gguf"));
+
+    let mut clone_source: Option<(String, String)> = None; // (исходный wav, id для темпа)
+    let mut named_voice = String::new();
+
+    if looks_path {
+        if !Path::new(voice_input).exists() {
+            let e = format!("файл голоса не найден: {voice_input}");
+            emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
+            return Err(e);
+        }
+        clone_source = Some((
+            voice_input.to_string(),
+            crate::modules::tts::ascii_voice_name(voice_input),
+        ));
+    } else if !voice_input.is_empty() {
+        let wav = crate::modules::tts::voices::voices_root(&settings.models_dir)
+            .join(format!("{voice_input}.wav"));
+        if wav.exists() {
+            if backend_clone {
+                // Клонирующий backend: грузим референс из хранилища.
+                clone_source = Some((wav.to_string_lossy().to_string(), voice_input.to_string()));
+            } else {
+                // Именованный backend: это зарегистрированный голос (customvoice).
+                named_voice = voice_input.to_string();
+            }
+        } else {
+            // Встроенный/baked спикер (fleurs-*, zero_shot и т.п.).
+            named_voice = voice_input.to_string();
+        }
+    }
+
+    let use_clone = backend_clone && clone_source.is_some();
+
     let startup_voice = if voice_type == "ggupack" {
         let base = if settings.models_dir.is_empty() {
             download::default_models_dir()
@@ -199,6 +273,24 @@ async fn tts_speak(
         } else {
             String::new()
         }
+    } else if use_clone {
+        // Референс грузим как `--voice` при старте сервера: cosyvoice3/zonos/…
+        // игнорируют per-request `voice=<name>.wav` и ищут только baked-банку
+        // (отсюда `voice ... not found (have 8)`). Стартовый `--voice <wav>`
+        // задаёт клон-референс по умолчанию, и в теле запроса `voice` не шлём.
+        let (src, id) = clone_source.unwrap();
+        let cr = crate::modules::tts::clone::prepare_clone_reference(
+            &settings.models_dir,
+            &src,
+            &id,
+            &backend,
+        )
+        .map_err(|e| {
+            emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
+            e
+        })?;
+        clone_ref_text = cr.ref_text;
+        cr.voice_path
     } else {
         String::new()
     };
@@ -219,17 +311,12 @@ async fn tts_speak(
             e
         })?;
 
-    // Голос для тела запроса — только для named/clone (ggupack уже загружен при старте).
-    // Резолвим в bare-id, который сервер подставит в <voice-dir>/<id>.wav (без
-    // разделителей путей — иначе 400 invalid_voice).
-    let body_voice = if voice_type == "ggupack" {
+    // Голос для тела запроса — только для named (ggupack/WAV-clone уже загружены
+    // при старте через --voice). Резолвим в bare-id без разделителей путей.
+    let body_voice = if voice_type == "ggupack" || use_clone {
         String::new()
     } else {
-        modules::tts::voices::resolve_voice_for_server(&s.models_dir, &voice)
-            .map_err(|e| {
-                emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
-                e
-            })?
+        named_voice.clone()
     };
     let body_instruct = if supports_instruct && !instruct.is_empty() {
         instruct.clone()
@@ -237,18 +324,46 @@ async fn tts_speak(
         String::new()
     };
 
+    // Для WAV-clone бэкендов референс уже подхвачен через `--voice`; для
+    // именованных (qwen3-tts-customvoice и т.п.) регистрируем голос в сервере.
+    let server_voice = if voice_type == "ggupack" || body_voice.is_empty() {
+        String::new()
+    } else {
+        state
+            .tts
+            .ensure_voice(&app, &s.models_dir, &body_voice)
+            .await
+            .map_err(|e| {
+                emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
+                e
+            })?
+    };
+
     emit_log(&app, "ТТС: синтез речи...");
     let wav = state
         .tts
-        .speak(&text, &body_voice, &body_instruct, speed)
+        .speak(&text, &server_voice, &body_instruct, &clone_ref_text, speed)
         .await
         .map_err(|e| {
             emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
             e
         })?;
 
-    emit_log(&app, &format!("ТТС: получено {} байт WAV", wav.len()));
-    Ok(wav)
+    let secs = start.elapsed().as_secs_f64();
+    let rtf = wav_duration_secs(&wav).map(|d| d / secs);
+    let mut msg = format!(
+        "ТТС: синтез завершён за {:.2} с ({} байт WAV)",
+        secs,
+        wav.len()
+    );
+    if let Some(r) = rtf {
+        msg.push_str(&format!(", скорость {:.2}x реального времени", r));
+    }
+    emit_log(&app, &msg);
+    Ok(TtsSpeakResult {
+        wav,
+        seconds: secs,
+    })
 }
 
 #[tauri::command]
@@ -260,6 +375,14 @@ async fn tts_presets() -> Result<Vec<Value>, String> {
 async fn tts_unload(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     emit_log(&app, "ТТС: выгрузка движка (освобождение VRAM)...");
     state.tts.stop().await;
+    Ok(())
+}
+
+/// Сохраняет синтезированный WAV (байты из фронта) по выбранному пользователем пути.
+#[tauri::command]
+async fn tts_save_wav(path: String, data: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, &data)
+        .map_err(|e| format!("не удалось сохранить WAV в {path}: {e}"))?;
     Ok(())
 }
 
@@ -419,6 +542,7 @@ pub fn run() {
             cancel,
             tts_speak,
             tts_unload,
+            tts_save_wav,
             tts_download_engine,
             tts_download_model,
             tts_presets,

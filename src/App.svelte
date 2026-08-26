@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { open, save } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
 
   let activeTab = $state<'main' | 'tts' | 'settings' | 'logs'>('main');
@@ -26,6 +26,7 @@
   let ttsPreset = $state('qwen3-tts');
   let ttsVoice = $state('');          // имя спикера (named) или путь к WAV (clone)
   let ttsStoredVoiceId = $state('');  // id сохранённого голоса из хранилища, '' = свой WAV
+  let ttsVoiceMode = $state<'preset' | 'clone'>('preset'); // для clone_named: встроенный спикер / клон своего WAV
   let ttsVoices = $state<{ id: string; name: string; path: string; ref_text: string; has_avatar: boolean; created_at: string }[]>([]);
   let showAddVoice = $state(false);
   let newVoiceName = $state('');
@@ -37,6 +38,8 @@
   let ttsSpeed = $state(1.0);
   let ttsText = $state('Привет, это тест синтеза речи.');
   let ttsStatus = $state('');
+  let lastTtsWav = $state<Uint8Array | null>(null); // последний синтезированный WAV для сохранения
+  let ttsGenTime = $state<number>(0); // время генерации озвучки, с (для подписи под полем)
   let ttsBusy = $state(false);
   let audioEl: HTMLAudioElement | undefined = $state(undefined);
 
@@ -59,8 +62,8 @@
 
   const selectedPreset = $derived(ttsPresets.find(p => p.id === ttsPreset));
   const vt = $derived(selectedPreset?.voice_type);
-  const showNamed = $derived(vt === 'named' || vt === 'clone_named');
-  const showClone = $derived(vt === 'clone' || vt === 'clone_named');
+  const showNamed = $derived(vt === 'named' || (vt === 'clone_named' && ttsVoiceMode === 'preset'));
+  const showClone = $derived(vt === 'clone' || (vt === 'clone_named' && ttsVoiceMode === 'clone'));
 
   function addPaths(paths: string[]) {
     const filtered = paths.filter(Boolean);
@@ -154,7 +157,7 @@
       dl = { kind: p.kind, name: p.name, current: p.downloaded, total: p.total };
     });
 
-    invoke<{ id: string; label: string; backend: string; has_codec: boolean; has_voice: boolean; voice_type: string; builtin_voices: string[]; supports_instruct: boolean }[]>('tts_presets')
+    invoke<{ id: string; label: string; backend: string; has_codec: boolean; has_voice: boolean; voice_type: string; builtin_voices: string[]; supports_instruct: boolean; supports_russian: boolean; size: string }[]>('tts_presets')
       .then((p) => { ttsPresets = p; })
       .catch(() => {});
 
@@ -342,25 +345,59 @@
     if ((showClone || showNamed) && !ttsVoice) { ttsStatus = 'выберите голос (имя или WAV для клонирования)'; return; }
 
     ttsBusy = true;
+    ttsGenTime = 0;
     ttsStatus = 'готовлю движок...';
     try {
-      const wav = await invoke<number[] | Uint8Array>('tts_speak', {
+      const res = await invoke<{ wav: number[] | Uint8Array; seconds: number }>('tts_speak', {
         preset: ttsPreset,
         voice: ttsVoice,
         instruct: selectedPreset.supports_instruct ? ttsInstruct : '',
         speed: ttsSpeed,
         text: ttsText,
       });
-      const blob = new Blob([new Uint8Array(wav as any)], { type: 'audio/wav' });
+      const wavBytes = new Uint8Array(res.wav as any);
+      lastTtsWav = wavBytes;
+      ttsGenTime = res.seconds;
+      const blob = new Blob([wavBytes], { type: 'audio/mpeg' });
       if (audioEl) {
         audioEl.src = URL.createObjectURL(blob);
+        audioEl.onended = () => { ttsStatus = 'озвучено ✓'; };
         await audioEl.play();
+        ttsStatus = 'воспроизвожу...';
+      } else {
+        ttsStatus = 'озвучено (нет плеера)';
       }
-      ttsStatus = 'воспроизвожу...';
     } catch (e) {
       ttsStatus = 'ошибка: ' + String(e);
     } finally {
       ttsBusy = false;
+    }
+  }
+
+  // Имя файла для сохранённой озвучки: «<название модели>_<дата>.mp3».
+  function ttsDefaultFileName() {
+    const label = selectedPreset?.label || ttsPreset || 'tts';
+    const safe = label
+      .replace(/[^\p{L}\p{N}_-]+/gu, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '');
+    const d = new Date();
+    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return `${safe}_${date}.mp3`;
+  }
+
+  async function saveTtsWav() {
+    if (!lastTtsWav) { ttsStatus = 'сначала озвучьте текст'; return; }
+    const path = await save({
+      filters: [{ name: 'MP3 Audio', extensions: ['mp3'] }],
+      defaultPath: ttsDefaultFileName(),
+    });
+    if (!path) return;
+    try {
+      await invoke('tts_save_wav', { path, data: Array.from(lastTtsWav) });
+      ttsStatus = 'MP3 сохранён: ' + path;
+    } catch (e) {
+      ttsStatus = 'ошибка сохранения: ' + String(e);
     }
   }
 
@@ -440,7 +477,7 @@
 
       <label for="tts_preset">Модель TTS (пресет):</label>
       <div class="row">
-          <select id="tts_preset" bind:value={ttsPreset} onchange={() => { ttsVoice = ''; ttsStoredVoiceId = ''; saveSettings(); }}>
+          <select id="tts_preset" bind:value={ttsPreset} onchange={() => { ttsVoice = ''; ttsStoredVoiceId = ''; ttsVoiceMode = 'preset'; saveSettings(); }}>
             {#each ttsPresets.filter(p => installedModels.find(m => m.id === p.id)?.installed) as p}
               <option value={p.id}>{p.label} ({p.size}){(p.voice_type === 'clone' || p.voice_type === 'clone_named') ? ' 🎭' : ''}</option>
             {/each}
@@ -450,13 +487,20 @@
         <p class="hint warn">Нет установленных моделей. Откройте «Настройки → Папка моделей TTS» и нажмите «Скачать».</p>
       {/if}
 
+      {#if vt === 'clone_named'}
+        <div class="mode-toggle" role="tablist" aria-label="Режим голоса">
+          <button type="button" role="tab" class:active={ttsVoiceMode === 'preset'} aria-selected={ttsVoiceMode === 'preset'} onclick={() => { ttsVoiceMode = 'preset'; ttsVoice = ''; ttsStoredVoiceId = ''; }}>Встроенный спикер</button>
+          <button type="button" role="tab" class:active={ttsVoiceMode === 'clone'} aria-selected={ttsVoiceMode === 'clone'} onclick={() => { ttsVoiceMode = 'clone'; ttsVoice = ''; ttsStoredVoiceId = ''; }}>Клонировать свой WAV</button>
+        </div>
+      {/if}
+
       {#if showNamed}
         <label for="tts_voice">Имя голоса (встроенный спикер):</label>
         <div class="row">
-          <input id="tts_voice" list="voice-list" bind:value={ttsVoice} placeholder="напр. af_heart / vivian" />
-          <datalist id="voice-list">
-            {#each selectedPreset.builtin_voices as v}<option value={v}></option>{/each}
-          </datalist>
+          <select id="tts_voice" bind:value={ttsVoice}>
+            <option value="" disabled>— выберите спикер —</option>
+            {#each selectedPreset?.builtin_voices ?? [] as v}<option value={v}>{v}</option>{/each}
+          </select>
         </div>
       {/if}
       {#if showClone}
@@ -538,6 +582,14 @@
 
       <label for="tts_text">Текст для озвучивания:</label>
       <textarea id="tts_text" class="tts-text" bind:value={ttsText}></textarea>
+
+      <div class="row actions">
+        <button onclick={saveTtsWav} disabled={!lastTtsWav || ttsBusy}>сохранить MP3…</button>
+      </div>
+
+      {#if ttsGenTime > 0}
+        <p class="hint">синтез речи сгенерирован за {ttsGenTime.toFixed(2)} с</p>
+      {/if}
 
       <div class="row actions">
         <button class="primary" onclick={ttsSpeak} disabled={ttsBusy}>озвучить</button>
@@ -634,6 +686,22 @@
   .tabs button { background: transparent; color: #cdd6f4; font-weight: 600; padding: 6px 12px; font-size: 14px; opacity: 0.6; }
   .tabs button.active { opacity: 1; background: #313244; color: #89b4fa; }
   .tabs button:hover:not(.active) { opacity: 0.8; background: #313244; }
+
+  /* Гарантируем светлый, читаемый текст во всех нативных контролах (был чёрный
+     на тёмном фоне на части систем). */
+  input, select, textarea { color: #cdd6f4; background: #313244; }
+  input::placeholder, textarea::placeholder { color: #7f849c; }
+  select option { background: #313244; color: #cdd6f4; }
+  input:disabled, textarea:disabled, select:disabled { opacity: 0.6; color: #a6adc8; }
+
+  /* Сегментированный переключатель режима (встроенный спикер / клон). */
+  .mode-toggle { display: flex; gap: 0; margin: 6px 0 12px; background: #181825; border: 1px solid #45475a; border-radius: 8px; padding: 3px; }
+  .mode-toggle button { flex: 1 1 0; width: 50%; background: transparent; color: #cdd6f4; border: none; border-radius: 6px; padding: 9px 12px; font-weight: 600; opacity: 0.7; }
+  .mode-toggle button.active { background: #89b4fa; color: #1e1e2e; opacity: 1; }
+  .mode-toggle button:hover:not(.active) { opacity: 1; background: #313244; }
+
+  /* Лёгкие «карточки» для секций TTS/настроек, чтобы не сливалось в кучу. */
+  .tts-section, .settings-section { background: #181825; border: 1px solid #313244; border-radius: 12px; padding: 18px 20px; }
 
   section { margin-bottom: 18px; }
   label { display: block; margin-bottom: 6px; opacity: 0.8; }
