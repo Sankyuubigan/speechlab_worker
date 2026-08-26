@@ -464,8 +464,10 @@ async fn tts_add_voice(
     src_audio: String,
     ref_text: String,
     avatar: String,
+    denoise: bool,
+    denoise_strength: f32,
 ) -> Result<modules::tts::voices::VoiceInfo, String> {
-    modules::tts::voices::add_voice(&app, &models_dir, &name, &src_audio, &ref_text, &avatar)
+    modules::tts::voices::add_voice(&app, &models_dir, &name, &src_audio, &ref_text, &avatar, denoise, denoise_strength)
 }
 
 #[tauri::command]
@@ -482,8 +484,10 @@ async fn tts_update_voice(
     ref_text: String,
     avatar: String,
     src_audio: String,
+    denoise: bool,
+    denoise_strength: f32,
 ) -> Result<modules::tts::voices::VoiceInfo, String> {
-    modules::tts::voices::update_voice(&app, &models_dir, &id, &name, &ref_text, &avatar, &src_audio)
+    modules::tts::voices::update_voice(&app, &models_dir, &id, &name, &ref_text, &avatar, &src_audio, denoise, denoise_strength)
 }
 
 #[tauri::command]

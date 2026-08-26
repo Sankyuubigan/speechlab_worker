@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
+use crate::modules::audio::denoise::{denoise_mono, DenoiseOpts};
 use crate::modules::audio::wav;
 
 /// Информация о сохранённом голосе из хранилища `<models_dir>/voices/<id>/`.
@@ -164,6 +165,8 @@ pub fn add_voice(
     src_audio: &str,
     ref_text: &str,
     avatar: &str,
+    denoise: bool,
+    denoise_strength: f32,
 ) -> Result<VoiceInfo, String> {
     if name.trim().is_empty() {
         return Err("укажите имя голоса".into());
@@ -195,6 +198,19 @@ pub fn add_voice(
     if mono.is_empty() {
         return Err("декодированное аудио пустое (тишина?)".into());
     }
+    let mono = if denoise {
+        denoise_mono(
+            &mono,
+            rate,
+            &DenoiseOpts {
+                enabled: true,
+                strength: denoise_strength,
+            },
+        )
+        .map_err(|e| format!("ошибка шумоподавления: {e}"))?
+    } else {
+        mono
+    };
     let wav_path = folder.join("voice.wav");
     wav::write_wav(&wav_path.to_string_lossy(), &mono, rate)
         .map_err(|e| format!("не удалось записать WAV: {e}"))?;
@@ -279,6 +295,8 @@ pub fn update_voice(
     ref_text: &str,
     avatar: &str,
     src_audio: &str,
+    denoise: bool,
+    denoise_strength: f32,
 ) -> Result<VoiceInfo, String> {
     let root = voices_root(models_dir);
     let folder = voice_folder(&root, id);
@@ -298,6 +316,19 @@ pub fn update_voice(
         if mono.is_empty() {
             return Err("декодированное аудио пустое (тишина?)".into());
         }
+        let mono = if denoise {
+            denoise_mono(
+                &mono,
+                rate,
+                &DenoiseOpts {
+                    enabled: true,
+                    strength: denoise_strength,
+                },
+            )
+            .map_err(|e| format!("ошибка шумоподавления: {e}"))?
+        } else {
+            mono
+        };
         wav::write_wav(&wav.to_string_lossy(), &mono, rate)
             .map_err(|e| format!("не удалось записать WAV: {e}"))?;
         let _ = std::fs::write(folder.join("ref_text.txt"), ref_text.trim());

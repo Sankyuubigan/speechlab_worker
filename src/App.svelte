@@ -37,6 +37,8 @@
   let ttsGenTime = $state<number>(0); // время генерации озвучки, с (для подписи под полем)
   let ttsBusy = $state(false);
   let audioEl: HTMLAudioElement | undefined = $state(undefined);
+  let ttsVolume = $state(1.0); // громкость воспроизведения: 0..1.5 (1.0 — как есть)
+  let audioCtx: AudioContext | null = null;
 
   // прогресс скачивания
   let dl = $state<{ kind: string; name: string; current: number; total: number }>({ kind: '', name: '', current: 0, total: 0 });
@@ -320,19 +322,45 @@
       const wavBytes = new Uint8Array(res.wav as any);
       lastTtsWav = wavBytes;
       ttsGenTime = res.seconds;
-      const blob = new Blob([wavBytes], { type: 'audio/mpeg' });
-      if (audioEl) {
-        audioEl.src = URL.createObjectURL(blob);
-        audioEl.onended = () => { ttsStatus = 'озвучено ✓'; };
-        await audioEl.play();
-        ttsStatus = 'воспроизвожу...';
-      } else {
-        ttsStatus = 'озвучено (нет плеера)';
-      }
+      const ok = await playWavWithVolume(wavBytes, ttsVolume);
+      ttsStatus = ok ? 'воспроизвожу...' : 'озвучено (нет плеера)';
     } catch (e) {
       ttsStatus = 'ошибка: ' + String(e);
     } finally {
       ttsBusy = false;
+    }
+  }
+
+  // Воспроизводит WAV через Web Audio API с регулируемой громкостью (GainNode),
+  // что позволяет выходить за пределы 1.0 (HTMLAudioElement.volume ограничен 1.0).
+  // При неудаче (нет Web Audio / не декодируется) — фолбэк на <audio>.
+  async function playWavWithVolume(bytes: Uint8Array, volume: number): Promise<boolean> {
+    try {
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!Ctx) return false;
+      if (!audioCtx) audioCtx = new Ctx();
+      if (audioCtx.state === 'suspended') await audioCtx.resume();
+      const buf = await audioCtx.decodeAudioData(bytes.buffer.slice(0));
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      const gain = audioCtx.createGain();
+      gain.gain.value = volume;
+      src.connect(gain).connect(audioCtx.destination);
+      src.onended = () => { ttsStatus = 'озвучено ✓'; };
+      src.start();
+      return true;
+    } catch {
+      try {
+        const blob = new Blob([bytes], { type: 'audio/wav' });
+        if (audioEl) {
+          audioEl.volume = Math.min(1, volume);
+          audioEl.src = URL.createObjectURL(blob);
+          audioEl.onended = () => { ttsStatus = 'озвучено ✓'; };
+          await audioEl.play();
+          return true;
+        }
+      } catch { /* */ }
+      return false;
     }
   }
 
@@ -517,6 +545,11 @@
       <label for="tts_speed">Скорость: {ttsSpeed.toFixed(2)}</label>
       <div class="row">
         <input id="tts_speed" type="range" min="0.25" max="4" step="0.05" bind:value={ttsSpeed} />
+      </div>
+
+      <label for="tts_volume">Громкость: {Math.round(ttsVolume * 100)}%</label>
+      <div class="row">
+        <input id="tts_volume" type="range" min="0" max="1.5" step="0.05" bind:value={ttsVolume} />
       </div>
 
       <label for="tts_text">Текст для озвучивания:</label>

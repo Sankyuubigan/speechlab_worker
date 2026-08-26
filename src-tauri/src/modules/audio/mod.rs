@@ -1,4 +1,5 @@
 pub mod decode;
+pub mod denoise;
 pub mod opus_decode;
 pub mod wav;
 

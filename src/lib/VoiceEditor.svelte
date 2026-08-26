@@ -21,6 +21,8 @@
   let refText = $state('');
   let audio = $state(''); // новый путь к аудио (для edit — замена)
   let avatar = $state(''); // новый путь к аватару
+  let denoise = $state(true); // шумоподавление RNNoise для новых/заменяемых голосов
+  let denoiseStrength = $state(0.9); // 0..1
   let removeAvatar = $state(false);
   let busy = $state(false);
   let status = $state('');
@@ -61,6 +63,8 @@
     refText = voice?.ref_text ?? '';
     audio = '';
     avatar = '';
+    denoise = true;
+    denoiseStrength = 0.9;
     removeAvatar = false;
     status = '';
   });
@@ -98,6 +102,8 @@
           refText,
           avatar: avatarArg,
           srcAudio: audio,
+          denoise,
+          denoiseStrength,
         });
         status = 'голос обновлён';
       } else {
@@ -107,6 +113,8 @@
           srcAudio: audio,
           refText,
           avatar,
+          denoise,
+          denoiseStrength,
         });
         status = 'голос добавлен';
       }
@@ -140,6 +148,17 @@
       <button onclick={pickAudio}>выбрать аудио</button>
       <span class="status">{audio ? baseName(audio) : editing ? 'без изменений' : 'не выбрано'}</span>
     </div>
+
+    {#if !editing || audio}
+      <label class="checkbox-row">
+        <input type="checkbox" bind:checked={denoise} />
+        шумоподавление (RNNoise)
+      </label>
+      {#if denoise}
+        <label for="ve_denoise">Сила шумоподавления: {Math.round(denoiseStrength * 100)}%</label>
+        <input id="ve_denoise" type="range" min="0" max="1" step="0.05" bind:value={denoiseStrength} />
+      {/if}
+    {/if}
 
     <label for="ve_text">Референсный текст (опц., улучшает качество):</label>
     <textarea id="ve_text" bind:value={refText} placeholder="что говорится в аудио"></textarea>
@@ -232,6 +251,24 @@
     flex-wrap: wrap;
     align-items: center;
     margin-bottom: 4px;
+  }
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 12px 0 4px;
+    opacity: 0.9;
+  }
+  .checkbox-row input {
+    flex: none;
+    width: auto;
+    min-width: auto;
+  }
+  input[type="range"] {
+    accent-color: #89b4fa;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0;
   }
   .status {
     opacity: 0.8;

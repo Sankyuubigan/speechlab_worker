@@ -28,6 +28,11 @@ anyhow = "1"
 opus = "0.3"
 ogg = "0.9"
 
+# Шумоподавление (RNNoise, чистый Rust, без системных зависимостей)
+nnnoiseless = "0.5"
+rubato = "5"
+audioadapter-buffers = "5"
+
 # ONNX inference
 ort = "2.0.0-rc.12"
 ndarray = "0.17"
