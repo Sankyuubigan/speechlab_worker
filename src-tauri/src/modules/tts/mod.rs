@@ -1,7 +1,7 @@
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(windows)]
@@ -9,6 +9,7 @@ use std::os::windows::process::CommandExt;
 
 use reqwest::Client;
 use tauri::AppHandle;
+use tauri::Emitter;
 
 use crate::modules::process_util::{kill_process_tree, JobGuard};
 
@@ -37,6 +38,12 @@ pub struct TtsEngine {
     loaded_codec: Mutex<String>,
     loaded_voice: Mutex<String>,
     loaded_backend: Mutex<String>,
+    /// Поддерживает ли загруженная модель явный выбор языка (`language`).
+    /// Определяется АДАПТИВНО (без хардкода по пресетам): проактивным опросом
+    /// сервера `/v1/models` + реактивной страховкой по stderr-предупреждению
+    /// («...codec_language table; using auto»). `Arc`, чтобы разделять флаг
+    /// между потоком перехвата stderr и асинхронными методами.
+    language_supported: Arc<Mutex<bool>>,
 }
 
 /// Собирает аргументы командной строки запуска сервера CrispASR.
@@ -87,10 +94,12 @@ fn engine_launch_args(
 
 /// Строит JSON-тело запроса к `POST /v1/audio/speech`.
 ///
-/// Намеренно НЕ включает `consent_attestation`: это поле заставляет движок
-/// синтезировать слышимый AI-дисклеймер (ватермарк). Сам ватермарк отключается
-/// на уровне процесса флагом `--no-watermark` в `ensure()`; здесь мы лишь не
-/// добавляем поле, которое его возвращает.
+/// `clone` — идёт ли синтез с клонированным голосом (референс из WAV/GGUF).
+/// В этом случае ОБЯЗАТЕЛЬНО добавляем `consent_attestation`: API движка
+/// требует это поле для клонирования (иначе 400 `consent_required`, см. логи
+/// chatterbox). Для обычных (не-clone) запросов поле НЕ добавляется — поведение
+/// полностью идентично прежнему, никаких водяных знаков/дисклеймеров не добавляется,
+/// т.к. процесс уже стартует с `--no-watermark` + `--no-spoken-disclaimer`.
 fn build_speech_body(
     backend: &str,
     text: &str,
@@ -98,6 +107,8 @@ fn build_speech_body(
     instructions: &str,
     ref_text: &str,
     speed: f32,
+    clone: bool,
+    language: &str,
 ) -> serde_json::Value {
     let mut body = serde_json::Map::new();
     body.insert("model".into(), serde_json::Value::String(backend.to_string()));
@@ -124,6 +135,15 @@ fn build_speech_body(
     if (speed - 1.0).abs() > f32::EPSILON {
         body.insert("speed".into(), serde_json::Value::from(speed));
     }
+    if clone {
+        body.insert(
+            "consent_attestation".into(),
+            serde_json::Value::String("I confirm I have the legal right to clone this voice.".into()),
+        );
+    }
+    if !language.is_empty() {
+        body.insert("language".into(), serde_json::Value::String(language.to_string()));
+    }
     serde_json::Value::Object(body)
 }
 
@@ -137,6 +157,7 @@ impl TtsEngine {
             loaded_codec: Mutex::new(String::new()),
             loaded_voice: Mutex::new(String::new()),
             loaded_backend: Mutex::new(String::new()),
+            language_supported: Arc::new(Mutex::new(true)),
         }
     }
 
@@ -281,14 +302,21 @@ impl TtsEngine {
         // дерева процессов даже при насильственном закрытии приложения.
         let job = JobGuard::assign(&child);
 
-        // Перенаправляем stderr движка в Логи.
+        // Перенаправляем stderr движка в Логи + буфер (для понятных ошибок запуска).
+        let err_log = Arc::new(Mutex::new(Vec::<String>::new()));
         if let Some(stderr) = child.stderr.take() {
             let app_clone = app.clone();
+            let err_log_clone = Arc::clone(&err_log);
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().flatten() {
                     let clean = sanitize_crispasr_line(&line);
                     crate::modules::log::app_log(&app_clone, &format!("[crispasr] {clean}"));
+                    if let Ok(mut buf) = err_log_clone.lock() {
+                        if buf.len() < 200 {
+                            buf.push(clean.clone());
+                        }
+                    }
                 }
             });
         }
@@ -300,6 +328,13 @@ impl TtsEngine {
         let mut ready = false;
         while started.elapsed() < HEALTH_TIMEOUT {
             if let Ok(Some(_)) = child.try_wait() {
+                let log = err_log.lock().unwrap();
+                let joined = log.join("\n");
+                if joined.contains("unknown backend") {
+                    return Err(format!(
+                        "Модель '{preset_id}' не поддерживается текущей версией движка CrispASR (unknown backend). Возможно, этот бэкенд ещё не реализован в установленной сборке — выберите другую модель или обновите движок TTS."
+                    ));
+                }
                 return Err("процесс движка завершился сразу (см. Логи: ошибка запуска/модели)".into());
             }
             if let Ok(resp) = client
@@ -320,6 +355,17 @@ impl TtsEngine {
             return Err("таймаут ожидания готовности движка (120 c)".into());
         }
 
+        // Язык: детерминированная политика по документации CrispASR
+        // (language-agnostic только voxcpm2/f5-tts/vibevoice — сами читают
+        // скрипт текста). Хрупкий runtime-probe по /v1/models + /backends и
+        // stderr-эвристика ложно выключали фичу для zonos/qwen (и могли
+        // «заразить» состояние TtsEngine между бэкендами), поэтому используем
+        // явную таблицу. Отправка `language` неподдерживающему бэкенду
+        // безопасна (игнорируется либо warning+auto, без 400).
+        let lang_ok = backend_supports_language_param(&backend);
+        *self.language_supported.lock().unwrap() = lang_ok;
+        emit_tts_caps(app, lang_ok);
+
         *self.child.lock().unwrap() = Some(child);
         *self.job.lock().unwrap() = job;
         *self.port.lock().unwrap() = port;
@@ -333,9 +379,10 @@ impl TtsEngine {
     /// Синтезирует текст в MP3 и возвращает сырые байты.
     ///
     /// `voice` — имя спикера или путь к WAV для клонирования (передаётся в теле запроса,
-    /// per-request; может быть пустым). Поле `consent_attestation` НЕ отправляется:
-    /// оно заставляет движок синтезировать слышимый AI-дисклеймер (ватермарк), который
-    /// уже отключён на уровне процесса флагом `--no-watermark` в `ensure()`.
+    /// per-request; может быть пустым). Поле `consent_attestation` отправляется ТОЛЬКО
+    /// когда `clone == true` (клонирование голоса); для обычных запросов оно не
+    /// добавляется, чтобы не провоцировать слышимый AI-дисклеймер. `language` — язык
+    /// синтеза ("ru"/"en"); пустая строка → авто-язык движка.
     /// `instructions` — стиль/описание голоса (только для поддерживающих моделей).
     pub async fn speak(
         &self,
@@ -344,6 +391,8 @@ impl TtsEngine {
         instructions: &str,
         ref_text: &str,
         speed: f32,
+        clone: bool,
+        language: &str,
     ) -> Result<Vec<u8>, String> {
         let port = *self.port.lock().unwrap();
         let backend = self.loaded_backend.lock().unwrap().clone();
@@ -354,7 +403,24 @@ impl TtsEngine {
         let client = Client::new();
         let url = format!("http://127.0.0.1:{port}/v1/audio/speech");
 
-        let body_value = build_speech_body(&backend, text, voice, instructions, ref_text, speed);
+        // Адаптивно: если модель игнорирует language (qwen3-tts base и т.п.),
+        // не шлём поле вовсе — чтобы не провоцировать предупреждение сервера
+        // «...codec_language table; using auto» и не создавать видимость фичи.
+        let effective_language = if *self.language_supported.lock().unwrap() {
+            language.to_string()
+        } else {
+            String::new()
+        };
+        let body_value = build_speech_body(
+            &backend,
+            text,
+            voice,
+            instructions,
+            ref_text,
+            speed,
+            clone,
+            &effective_language,
+        );
 
         let resp = client
             .post(&url)
@@ -388,14 +454,20 @@ impl TtsEngine {
     ///
     /// Если локальный wav отсутствует — возвращаем ЧЕСТНУЮ ошибку (не глухой 500,
     /// core rules §2.2), вместо того чтобы слать несуществующий голос.
+    ///
+    /// Возвращает кортеж `(имя_на_сервере, был_ли_загружен_клон)`. Второй флаг
+    /// нужен вызывающему: если голос был загружен как клон (custom WAV), то в теле
+    /// `POST /v1/audio/speech` обязательно требуется `consent_attestation`
+    /// (иначе 400 `consent_required`, см. логи chatterbox). Для baked/встроенных
+    /// спикеров (`vivian` и т.п.) флаг `false` — consent не нужен.
     pub async fn ensure_voice(
         &self,
         app: &AppHandle,
         models_dir: &str,
         voice_id: &str,
-    ) -> Result<String, String> {
+    ) -> Result<(String, bool), String> {
         if voice_id.is_empty() {
-            return Ok(String::new());
+            return Ok((String::new(), false));
         }
         let root = voices::voices_root(models_dir);
         let wav = root.join(voice_id).join("voice.wav");
@@ -404,11 +476,11 @@ impl TtsEngine {
             // fleurs-* и т.п.). Сервер сам резолвит такие имена; загружать нечего.
             // Если имя всё же невалидно — сервер вернёт 500, который пробросится
             // честно (core rules §2.2).
-            return Ok(voice_id.to_string());
+            return Ok((voice_id.to_string(), false));
         }
         let server_name = ascii_voice_name(voice_id);
         if self.voice_registered(&server_name).await {
-            return Ok(server_name);
+            return Ok((server_name, true));
         }
         let txt = root.join(voice_id).join("ref_text.txt");
         let transcript = if txt.exists() {
@@ -419,7 +491,7 @@ impl TtsEngine {
         let bytes = std::fs::read(&wav)
             .map_err(|e| format!("не удалось прочитать файл голоса {}: {e}", wav.display()))?;
         self.upload_voice(app, &server_name, &bytes, &transcript).await?;
-        Ok(server_name)
+        Ok((server_name, true))
     }
 
     /// Спрашивает сервер, зарегистрирован ли голос с именем `name` (GET /v1/voices).
@@ -501,7 +573,41 @@ impl TtsEngine {
         *self.loaded_codec.lock().unwrap() = String::new();
         *self.loaded_voice.lock().unwrap() = String::new();
         *self.loaded_backend.lock().unwrap() = String::new();
+        // Сбрасываем в оптимистичное значение: следующий ensure перепроверит.
+        *self.language_supported.lock().unwrap() = true;
     }
+
+/// Возвращает, поддерживает ли загруженная модель явный выбор языка.
+/// Адаптивно определено политикой `backend_supports_language_param`
+/// (см. `ensure`/`emit_tts_caps`).
+pub fn supports_language(&self) -> bool {
+    *self.language_supported.lock().unwrap()
+}
+}
+
+/// Уведомляет фронт об актуальных возможностях загруженного движка TTS.
+/// Сейчас несёт только `language`, но структура открыта для расширения.
+fn emit_tts_caps(app: &AppHandle, language: bool) {
+    let _ = app.emit(
+        "tts-caps",
+        serde_json::json!({ "language": language }),
+    );
+}
+
+/// Возвращает, принимает ли бэкенд явный выбор языка (`language` в
+/// `POST /v1/audio/speech`).
+///
+/// По документации CrispASR language-agnostic (читают скрипт текста сами и
+/// не нуждаются в поле) только: `voxcpm2`, `f5-tts`, `vibevoice`. Все остальные
+/// либо кондиционируют язык (qwen3-tts → `codec_language_id`; cosyvoice3/moss →
+/// prompt; kokoro/zonos/piper → eSpeak-голос), либо игнорируют поле без ошибки.
+/// Отправка `language` «неподдерживающему» бэкенду безопасна — поэтому список
+/// ограничен только явно language-agnostic моделями.
+fn backend_supports_language_param(backend: &str) -> bool {
+    !matches!(
+        backend,
+        "voxcpm2" | "voxcpm2-tts" | "f5-tts" | "vibevoice" | "vibevoice-tts"
+    )
 }
 
 impl Default for TtsEngine {

@@ -184,6 +184,7 @@ async fn tts_speak(
     instruct: String,
     speed: f32,
     text: String,
+    language: String,
 ) -> Result<TtsSpeakResult, String> {
     let start = Instant::now();
     let settings = load_tts_settings(&app);
@@ -254,7 +255,30 @@ async fn tts_speak(
 
     let use_clone = backend_clone && clone_source.is_some();
 
-    let startup_voice = if voice_type == "ggupack" {
+    let startup_voice = if use_clone {
+        // Референс грузим как `--voice` при старте сервера: cosyvoice3/zonos/
+        // qwen3-tts и т.п. игнорируют per-request `voice=<name>.wav` и ищут
+        // только baked-банку (отсюда `voice ... not found (have 8)`). Стартовый
+        // `--voice <wav>` задаёт клон-референс по умолчанию, и в теле запроса
+        // `voice` не шлём.
+        // Приоритет ПЕРЕД дефолтным `voice`-паком пресета: иначе выбор клона
+        // пользователя перекрывался бы стандартным голосом (слышимый акцент).
+        let (src, id) = clone_source.clone().unwrap();
+        let cr = crate::modules::tts::clone::prepare_clone_reference(
+            &settings.models_dir,
+            &src,
+            &id,
+            &backend,
+        )
+        .map_err(|e| {
+            emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
+            e
+        })?;
+        clone_ref_text = cr.ref_text;
+        cr.voice_path
+    } else if voice_type == "ggupack" || voice_type == "clone" || voice_type == "clone_named" {
+        // Дефолтный голосовой пак пресета (если есть) — fallback, когда
+        // пользователь не дал свой WAV-референс для клонирования.
         let base = if settings.models_dir.is_empty() {
             download::default_models_dir()
         } else {
@@ -274,24 +298,6 @@ async fn tts_speak(
         } else {
             String::new()
         }
-    } else if use_clone {
-        // Референс грузим как `--voice` при старте сервера: cosyvoice3/zonos/…
-        // игнорируют per-request `voice=<name>.wav` и ищут только baked-банку
-        // (отсюда `voice ... not found (have 8)`). Стартовый `--voice <wav>`
-        // задаёт клон-референс по умолчанию, и в теле запроса `voice` не шлём.
-        let (src, id) = clone_source.unwrap();
-        let cr = crate::modules::tts::clone::prepare_clone_reference(
-            &settings.models_dir,
-            &src,
-            &id,
-            &backend,
-        )
-        .map_err(|e| {
-            emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
-            e
-        })?;
-        clone_ref_text = cr.ref_text;
-        cr.voice_path
     } else {
         String::new()
     };
@@ -327,8 +333,8 @@ async fn tts_speak(
 
     // Для WAV-clone бэкендов референс уже подхвачен через `--voice`; для
     // именованных (qwen3-tts-customvoice и т.п.) регистрируем голос в сервере.
-    let server_voice = if voice_type == "ggupack" || body_voice.is_empty() {
-        String::new()
+    let (server_voice, voice_uploaded) = if voice_type == "ggupack" || body_voice.is_empty() {
+        (String::new(), false)
     } else {
         state
             .tts
@@ -340,10 +346,16 @@ async fn tts_speak(
             })?
     };
 
+    // Клон = либо WAV-референс через `--voice` при старте (use_clone), либо
+    // загруженный custom-голос через POST /v1/voices (voice_uploaded). В обоих
+    // случаях в теле синтеза обязателен `consent_attestation` (иначе 400
+    // consent_required, см. логи chatterbox).
+    let clone = use_clone || voice_uploaded;
+
     emit_log(&app, "ТТС: синтез речи...");
     let wav = state
         .tts
-        .speak(&text, &server_voice, &body_instruct, &clone_ref_text, speed)
+        .speak(&text, &server_voice, &body_instruct, &clone_ref_text, speed, clone, &language)
         .await
         .map_err(|e| {
             emit_log(&app, &format!("ТТС ОШИБКА: {e}"));
@@ -370,6 +382,15 @@ async fn tts_speak(
 #[tauri::command]
 async fn tts_presets() -> Result<Vec<Value>, String> {
     Ok(modules::tts::download::list_presets())
+}
+
+/// Возвращает актуальные возможности загруженного движка TTS (адаптивно
+/// определённые по самому серверу CrispASR, без хардкода по пресетам).
+/// Пока несёт только `language` — поддерживает ли модель явный выбор языка.
+#[tauri::command]
+fn tts_capabilities(state: State<'_, AppState>) -> Result<Value, String> {
+    let language = state.tts.supports_language();
+    Ok(json!({ "language": language }))
 }
 
 #[tauri::command]
@@ -584,6 +605,7 @@ pub fn run() {
             tts_download_engine,
             tts_download_model,
             tts_presets,
+            tts_capabilities,
             tts_engine_backends,
             tts_list_models,
             tts_list_voices,

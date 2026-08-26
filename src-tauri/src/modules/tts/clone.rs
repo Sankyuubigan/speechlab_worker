@@ -12,6 +12,8 @@ use crate::modules::tts::voices;
 ///   выхлоп (issue #334) → жёсткий cap 10 с.
 /// - f5-tts / zonos / voxcpm2 / dots / irodori / indextts / omnivoice / moss /
 ///   confucius4 / pocket / vibevoice-1.5b / tada: 3–15 с → cap 15 с.
+/// - qwen3-tts (Base / 1.7B-Base / 1.7B-VoiceDesign): zero-shot клонирование
+///   из WAV (+ baked voice-pack GGUF). Референс 3–15 с → cap 15 с.
 pub fn clone_reference_limits(backend: &str) -> Option<(f32, f32)> {
     match backend {
         "cosyvoice3-tts" | "cosyvoice3-tts-rl" => Some((3.0, 10.0)),
@@ -27,6 +29,7 @@ pub fn clone_reference_limits(backend: &str) -> Option<(f32, f32)> {
         "pocket-tts" => Some((3.0, 15.0)),
         "vibevoice-1.5b" => Some((3.0, 15.0)),
         "tada" | "tada-1b" | "tada-3b-ml" => Some((5.0, 15.0)),
+        "qwen3-tts" | "qwen3-tts-1.7b-base" | "qwen3-tts-1.7b-voicedesign" => Some((3.0, 15.0)),
         _ => None,
     }
 }
@@ -152,8 +155,10 @@ mod tests {
         assert_eq!(clone_reference_limits("f5-tts"), Some((3.0, 15.0)));
         assert_eq!(clone_reference_limits("zonos"), Some((3.0, 15.0)));
         // Не клонирующие из WAV бэкенды — None.
-        assert_eq!(clone_reference_limits("qwen3-tts"), None);
         assert_eq!(clone_reference_limits("kokoro"), None);
+        // qwen3-tts теперь клонирует (Base / 1.7B-Base).
+        assert_eq!(clone_reference_limits("qwen3-tts"), Some((3.0, 15.0)));
+        assert_eq!(clone_reference_limits("qwen3-tts-1.7b-base"), Some((3.0, 15.0)));
     }
 
     #[test]

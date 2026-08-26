@@ -32,13 +32,14 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCMEZGRUE5MUIxQjVGQzUKUldURlh4c2JxZjRQYS9Bc1hUckFGUmoxTnRoNGY1ZytROTRRbTF4T09aUnZCcDlBTzNRTkQydWoK",
       "endpoints": [
-        "https://raw.githubusercontent.com/USER/REPO/main/latest.json"
+        "https://raw.githubusercontent.com/Sankyuubigan/speechlab_worker/main/latest.json"
       ]
     }
   }

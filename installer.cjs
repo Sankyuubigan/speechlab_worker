@@ -55,9 +55,6 @@ function injectPubkey(pubkey) {
   cfg.plugins = cfg.plugins || {};
   cfg.plugins.updater = cfg.plugins.updater || {};
   cfg.plugins.updater.pubkey = pubkey;
-  if (!Array.isArray(cfg.plugins.updater.endpoints) || cfg.plugins.updater.endpoints.length === 0) {
-    cfg.plugins.updater.endpoints = ['https://raw.githubusercontent.com/USER/REPO/main/latest.json'];
-  }
   cfg.bundle = cfg.bundle || {};
   cfg.bundle.createUpdaterArtifacts = true;
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n');

@@ -29,6 +29,8 @@
   let ttsStoredVoiceId = $state('');  // id сохранённого голоса из хранилища, '' = свой WAV
   let ttsVoiceMode = $state<'preset' | 'clone'>('preset'); // для clone_named: встроенный спикер / клон своего WAV
   let ttsVoices = $state<{ id: string; name: string; path: string; ref_text: string; has_avatar: boolean; created_at: string }[]>([]);
+  let ttsLang = $state('ru');           // язык синтеза: ru/en/zh/ja/de/fr/es/ko/pt/it
+  let ttsCaps = $state({ language: true }); // адаптивные возможности движка (язык и т.п.)
   let ttsInstruct = $state('');
   let ttsSpeed = $state(1.0);
   let ttsText = $state('Привет, это тест синтеза речи.');
@@ -121,6 +123,11 @@
       dl = { kind: p.kind, name: p.name, current: p.downloaded, total: p.total };
     });
 
+    // Адаптивные возможности движка TTS (язык и т.п.), определённые самим сервером.
+    const unlistenCaps = listen<{ language: boolean }>('tts-caps', (event) => {
+      ttsCaps = event.payload;
+    });
+
     invoke<{ id: string; label: string; backend: string; has_codec: boolean; has_voice: boolean; voice_type: string; builtin_voices: string[]; supports_instruct: boolean; supports_russian: boolean; size: string }[]>('tts_presets')
       .then((p) => { ttsPresets = p; })
       .catch(() => {});
@@ -156,6 +163,7 @@
       unlistenDrop.then(fn => fn());
       unlistenLog.then(fn => fn());
       unlistenDl.then(fn => fn());
+      unlistenCaps.then(fn => fn());
     };
   });
 
@@ -318,6 +326,7 @@
         instruct: selectedPreset.supports_instruct ? ttsInstruct : '',
         speed: ttsSpeed,
         text: ttsText,
+        language: ttsCaps.language ? ttsLang : '',
       });
       const wavBytes = new Uint8Array(res.wav as any);
       lastTtsWav = wavBytes;
@@ -364,7 +373,8 @@
     }
   }
 
-  // Имя файла для сохранённой озвучки: «<название модели>_<дата>.mp3».
+  // Имя файла для сохранённой озвучки: «<название модели>_<дата>_<время>.mp3».
+  // Секунды нужны, чтобы повторные озвучки не перезаписывали друг друга.
   function ttsDefaultFileName() {
     const label = selectedPreset?.label || ttsPreset || 'tts';
     const safe = label
@@ -372,8 +382,10 @@
       .replace(/_+/g, '_')
       .replace(/^_|_$/g, '');
     const d = new Date();
-    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    return `${safe}_${date}.mp3`;
+    const p = (n: number) => String(n).padStart(2, '0');
+    const date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const time = `${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+    return `${safe}_${date}_${time}.mp3`;
   }
 
   async function saveTtsWav() {
@@ -467,7 +479,7 @@
 
       <label for="tts_preset">Модель TTS (пресет):</label>
       <div class="row">
-          <select id="tts_preset" bind:value={ttsPreset} onchange={() => { ttsVoice = ''; ttsStoredVoiceId = ''; ttsVoiceMode = 'preset'; saveSettings(); }}>
+          <select id="tts_preset" bind:value={ttsPreset} onchange={() => { ttsVoice = ''; ttsStoredVoiceId = ''; ttsVoiceMode = 'preset'; ttsLang = selectedPreset?.supports_russian ? 'ru' : 'en'; ttsCaps = { language: true }; saveSettings(); }}>
             {#each ttsPresets.filter(p => installedModels.find(m => m.id === p.id)?.installed) as p}
               <option value={p.id}>{p.label} ({p.size}){(p.voice_type === 'clone' || p.voice_type === 'clone_named') ? ' 🎭' : ''}</option>
             {/each}
@@ -529,6 +541,23 @@
       {#if !showNamed && !showClone && selectedPreset?.voice_type === 'ggupack'}
         <p class="hint">Голосовой GGUF-пак скачивается автоматически вместе с моделью (стандартный голос).</p>
       {/if}
+
+      <label for="tts_lang">Язык синтеза:</label>
+      <div class="row">
+        <select id="tts_lang" bind:value={ttsLang} disabled={!ttsCaps.language}>
+          <option value="ru">Русский</option>
+          <option value="en">English</option>
+          <option value="zh">中文</option>
+          <option value="ja">日本語</option>
+          <option value="de">Deutsch</option>
+          <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="ko">한국어</option>
+          <option value="pt">Português</option>
+          <option value="it">Italiano</option>
+        </select>
+        <span class="hint">{ttsCaps.language ? (selectedPreset?.supports_russian ? 'модель поддерживает русский' : 'русский может не поддерживаться') : 'модель определяет язык автоматически по тексту — выбор не нужен'}</span>
+      </div>
 
       <label for="tts_instruct">Инструкция (стиль/описание голоса):</label>
       {#if selectedPreset?.supports_instruct}

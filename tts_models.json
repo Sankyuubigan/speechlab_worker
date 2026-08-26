@@ -1,7 +1,7 @@
 [
   {
     "id": "qwen3-tts",
-    "label": "Qwen3-TTS 0.6B (базовый, RU, голос-пак)",
+    "label": "Qwen3-TTS 0.6B (базовый, RU, клон голоса)",
     "backend": "qwen3-tts",
     "model_file": "qwen3-tts-12hz-0.6b-base-q8_0.gguf",
     "model_url": "https://huggingface.co/cstr/qwen3-tts-0.6b-base-GGUF/resolve/main/qwen3-tts-12hz-0.6b-base-q8_0.gguf",
@@ -14,7 +14,7 @@
       "https://huggingface.co/cstr/qwen3-tts-voices-GGUF/resolve/main/qwen3-tts-voice-default.gguf"
     ],
     "extras": [],
-    "voice_type": "ggupack",
+    "voice_type": "clone",
     "builtin_voices": [],
     "supports_instruct": false,
     "supports_russian": true,
@@ -45,6 +45,27 @@
       "vivian"
     ],
     "supports_instruct": true,
+    "supports_russian": true,
+    "size": "2 GB"
+  },
+  {
+    "id": "qwen3-tts-1.7b-base",
+    "label": "Qwen3-TTS 1.7B Base (клон голоса, RU)",
+    "backend": "qwen3-tts-1.7b-base",
+    "model_file": "qwen3-tts-12hz-1.7b-base-q8_0.gguf",
+    "model_url": "https://huggingface.co/cstr/qwen3-tts-1.7b-base-GGUF/resolve/main/qwen3-tts-12hz-1.7b-base-q8_0.gguf",
+    "codec": [
+      "qwen3-tts-tokenizer-12hz.gguf",
+      "https://huggingface.co/cstr/qwen3-tts-tokenizer-12hz-GGUF/resolve/main/qwen3-tts-tokenizer-12hz.gguf"
+    ],
+    "voice": [
+      "qwen3-tts-voice-default.gguf",
+      "https://huggingface.co/cstr/qwen3-tts-voices-GGUF/resolve/main/qwen3-tts-voice-default.gguf"
+    ],
+    "extras": [],
+    "voice_type": "clone",
+    "builtin_voices": [],
+    "supports_instruct": false,
     "supports_russian": true,
     "size": "2 GB"
   },

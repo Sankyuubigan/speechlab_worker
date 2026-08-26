@@ -22,6 +22,26 @@ pub struct VoiceInfo {
     pub created_at: String,
 }
 
+/// Максимальная длительность сохраняемого референса (секунды).
+///
+/// Весь загруженный файл обрезается до первых `MAX_VOICE_REF_SEC` секунд при
+/// сохранении в хранилище. Это стандартный размер референса для клонирования:
+/// cosyvoice3 жёстко кэпит референс на 10 с, а 15-секундные бэкенды (f5/zonos/
+/// qwen3/…) при клонировании всё равно урежут длинный файл, так что хранить
+/// больше нет смысла, а диск экономится.
+const MAX_VOICE_REF_SEC: f32 = 10.0;
+
+/// Обрезает моно-сэмплы до первых `MAX_VOICE_REF_SEC` секунд (с начала).
+/// Если аудио короче — возвращает как есть.
+fn trim_to_max_sec(mono: &[f32], rate: u32) -> Vec<f32> {
+    let max_samples = (MAX_VOICE_REF_SEC * rate as f32) as usize;
+    if mono.len() > max_samples {
+        mono[..max_samples].to_vec()
+    } else {
+        mono.to_vec()
+    }
+}
+
 /// Корень хранилища голосов: `<models_dir>/voices`.
 pub fn voices_root(models_dir: &str) -> PathBuf {
     let base: PathBuf = if models_dir.is_empty() {
@@ -155,6 +175,7 @@ pub fn resolve_voice_for_server(models_dir: &str, voice: &str) -> Result<String,
 ///
 /// `src_audio` декодируется (любой формат: ogg/wav/flac/mp3/opus) и конвертируется в
 /// моно-WAV с **оригинальной** частотой дискретизации (`decode_to_mono` + `wav::write_wav`).
+/// Референс обрезается до первых `MAX_VOICE_REF_SEC` секунд (стандарт клонирования).
 /// Рядом сохраняются `ref_text.txt`, опционально `avatar.jpg` и манифест `voice.json`.
 ///
 /// Если голос с таким именем уже есть — к id добавляется суффикс `_2`, `_3`, …
@@ -211,6 +232,8 @@ pub fn add_voice(
     } else {
         mono
     };
+    // Обрезаем референс до стандартных MAX_VOICE_REF_SEC секунд (первые N секунд).
+    let mono = trim_to_max_sec(&mono, rate);
     let wav_path = folder.join("voice.wav");
     wav::write_wav(&wav_path.to_string_lossy(), &mono, rate)
         .map_err(|e| format!("не удалось записать WAV: {e}"))?;
@@ -284,7 +307,8 @@ pub fn delete_voice(models_dir: &str, id: &str) -> Result<(), String> {
 /// `id` остаётся стабильным. Меняются только отображаемые поля:
 /// - `name`/`ref_text` перезаписывают манифест `voice.json`;
 /// - `src_audio` — если непустой и файл существует, перекодируется в моно-WAV и
-///   перезаписывает `voice.wav` + `ref_text.txt`;
+///   перезаписывает `voice.wav` + `ref_text.txt` (референс обрезается до
+///   первых `MAX_VOICE_REF_SEC` секунд);
 /// - `avatar` — если `"__REMOVE__"` → удаляет `avatar.jpg`; если непустой и это
 ///   картинка → заменяет; иначе остаётся без изменений.
 pub fn update_voice(
@@ -329,6 +353,8 @@ pub fn update_voice(
         } else {
             mono
         };
+        // Обрезаем референс до стандартных MAX_VOICE_REF_SEC секунд (первые N секунд).
+        let mono = trim_to_max_sec(&mono, rate);
         wav::write_wav(&wav.to_string_lossy(), &mono, rate)
             .map_err(|e| format!("не удалось записать WAV: {e}"))?;
         let _ = std::fs::write(folder.join("ref_text.txt"), ref_text.trim());

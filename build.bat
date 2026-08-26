@@ -11,11 +11,12 @@ for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\
 )
 
 REM Remove sccache wrappers that break cc-rs
-set "CC="
-set "CXX="
+set "CC=cl"
+set "CXX=cl"
 set "CMAKE_C_COMPILER_LAUNCHER="
 set "CMAKE_CXX_COMPILER_LAUNCHER="
 set "RUSTC_WRAPPER="
+set "CARGO_BUILD_RUSTC_WRAPPER="
 set "CMAKE_POLICY_VERSION_MINIMUM=3.5"
 
 node build.cjs

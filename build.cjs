@@ -54,16 +54,21 @@ async function main() {
         }
 
         console.log('\n========================================');
-        console.log('[3/5] Сборка Rust (debug)...');
-        
+        console.log('[3/5] Сборка фронтенда (npm run build -> dist)...');
+
         // Превентивно создаем dist, чтобы tauri-build не ругался на отсутствие папки, за которой он следит
         const distDir = path.join(scriptDir, 'dist');
         if (!fs.existsSync(distDir)) {
             fs.mkdirSync(distDir, { recursive: true });
         }
 
-        // Собираем без временных файлов (чтобы не ломать cargo watch/test)
-        await runCommand('npx', ['tauri', 'build', '--debug']);
+        await runCommand('npm', ['run', 'build']);
+
+        console.log('\n========================================');
+        console.log('[3b/5] Сборка Rust (debug, cargo build БЕЗ bundling/подписи)...');
+        // rules.md S2: build.bat - быстрая dev-сборка БЕЗ .exe установщика и без подписи.
+        // Используем cargo build напрямую, а не `npx tauri build` (который билдит msi/nsis и требует ключ).
+        await runCommand('cargo', ['build', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'tauri/custom-protocol']);
 
         const debugDir = path.join(scriptDir, 'src-tauri', 'target', 'debug');
         const exePath = path.join(debugDir, EXE_NAME);
