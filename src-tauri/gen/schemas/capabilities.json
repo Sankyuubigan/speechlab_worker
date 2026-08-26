@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"default capability for SpeechLab","local":true,"windows":["main"],"permissions":["core:default","core:webview:allow-internal-toggle-devtools","dialog:default","dialog:allow-open","opener:default","core:event:default"]}}
+{"default":{"identifier":"default","description":"default capability for SpeechLab","local":true,"windows":["main"],"permissions":["core:default","core:webview:allow-internal-toggle-devtools","dialog:default","dialog:allow-open","opener:default","updater:default","core:event:default"]}}

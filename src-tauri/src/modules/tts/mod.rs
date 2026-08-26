@@ -398,7 +398,7 @@ impl TtsEngine {
             return Ok(String::new());
         }
         let root = voices::voices_root(models_dir);
-        let wav = root.join(format!("{voice_id}.wav"));
+        let wav = root.join(voice_id).join("voice.wav");
         if !wav.exists() {
             // Нет локального wav — считаем встроенным/baked голосом (zero_shot,
             // fleurs-* и т.п.). Сервер сам резолвит такие имена; загружать нечего.
@@ -410,7 +410,7 @@ impl TtsEngine {
         if self.voice_registered(&server_name).await {
             return Ok(server_name);
         }
-        let txt = root.join(format!("{voice_id}.txt"));
+        let txt = root.join(voice_id).join("ref_text.txt");
         let transcript = if txt.exists() {
             std::fs::read_to_string(&txt).unwrap_or_default()
         } else {

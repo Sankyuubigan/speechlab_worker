@@ -73,7 +73,10 @@ pub fn prepare_clone_reference(
 
     let (voice_path, ref_text) = match clone_reference_limits(backend) {
         Some((_min, max)) => {
-            let trimmed = root.join(format!("{cache_id}.__clone.wav"));
+            // Кэш клонирования — в нейтральной служебной папке (не внутри <id>/).
+            let cache_dir = root.join(".clone_cache");
+            let _ = std::fs::create_dir_all(&cache_dir);
+            let trimmed = cache_dir.join(format!("{cache_id}.wav"));
             let need_rebuild = !trimmed.exists()
                 || {
                     let src_m = std::fs::metadata(src).ok().and_then(|m| m.modified().ok());
@@ -107,12 +110,35 @@ pub fn prepare_clone_reference(
 }
 
 fn read_ref_text(root: &std::path::Path, voice_id: &str) -> String {
-    let txt = root.join(format!("{voice_id}.txt"));
+    let txt = root.join(voice_id).join("ref_text.txt");
     if txt.exists() {
         std::fs::read_to_string(&txt).unwrap_or_default()
     } else {
         String::new()
     }
+}
+
+/// Возвращает байты **обрезанного** референса голоса (такой же, какой пойдёт в
+/// клонирование, ≤ лимита длительности бэкенда). Используется для превью-проигрывания
+/// в редакторе голоса. Бэкенд по умолчанию — `cosyvoice3-tts` (лимит 10 с).
+pub fn voice_trimmed_audio(
+    models_dir: &str,
+    id: &str,
+    backend: &str,
+) -> Result<Vec<u8>, String> {
+    let root = voices::voices_root(models_dir);
+    let wav = root.join(id).join("voice.wav");
+    if !wav.exists() {
+        return Err(format!("файл голоса не найден: {id}"));
+    }
+    let backend = if backend.is_empty() {
+        "cosyvoice3-tts"
+    } else {
+        backend
+    };
+    let cr = prepare_clone_reference(models_dir, &wav.to_string_lossy(), id, backend)?;
+    std::fs::read(&cr.voice_path)
+        .map_err(|e| format!("не удалось прочитать обрезанный референс {}: {e}", cr.voice_path))
 }
 
 #[cfg(test)]

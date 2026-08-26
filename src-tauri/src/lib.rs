@@ -236,7 +236,8 @@ async fn tts_speak(
         ));
     } else if !voice_input.is_empty() {
         let wav = crate::modules::tts::voices::voices_root(&settings.models_dir)
-            .join(format!("{voice_input}.wav"));
+            .join(&voice_input)
+            .join("voice.wav");
         if wav.exists() {
             if backend_clone {
                 // Клонирующий backend: грузим референс из хранилища.
@@ -496,6 +497,15 @@ async fn tts_voice_audio(models_dir: String, id: String) -> Result<Vec<u8>, Stri
 }
 
 #[tauri::command]
+async fn tts_voice_trimmed_audio(
+    models_dir: String,
+    id: String,
+    backend: String,
+) -> Result<Vec<u8>, String> {
+    modules::tts::clone::voice_trimmed_audio(&models_dir, &id, &backend)
+}
+
+#[tauri::command]
 async fn tts_check_update(app: AppHandle) -> Value {
     let settings = load_tts_settings(&app);
     match download::engine_backends().await {
@@ -546,6 +556,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|_app| {
             crate::modules::log::truncate_last_logs();
             // Зачистка зомби от предыдущих крашей (rules.md §6.5).
@@ -577,6 +588,7 @@ pub fn run() {
             tts_update_voice,
             tts_voice_avatar,
             tts_voice_audio,
+            tts_voice_trimmed_audio,
             tts_check_update,
             tts_default_dirs,
             tts_get_settings,

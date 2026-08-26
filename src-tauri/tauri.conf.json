@@ -34,5 +34,12 @@
       "icons/icon.ico"
     ]
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCMEZGRUE5MUIxQjVGQzUKUldURlh4c2JxZjRQYS9Bc1hUckFGUmoxTnRoNGY1ZytROTRRbTF4T09aUnZCcDlBTzNRTkQydWoK",
+      "endpoints": [
+        "https://raw.githubusercontent.com/USER/REPO/main/latest.json"
+      ]
+    }
+  }
 }

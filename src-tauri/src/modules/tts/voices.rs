@@ -11,7 +11,7 @@ pub struct VoiceInfo {
     pub id: String,
     /// Отображаемое имя (то, что дал пользователь).
     pub name: String,
-    /// Абсолютный путь к `ref_audio.wav` (для передачи в `--voice`/тело запроса).
+    /// Абсолютный путь к `voice.wav` (для передачи в `--voice`/тело запроса).
     pub path: String,
     /// Референсный текст (если указан).
     pub ref_text: String,
@@ -29,6 +29,11 @@ pub fn voices_root(models_dir: &str) -> PathBuf {
         PathBuf::from(models_dir)
     };
     base.join("voices")
+}
+
+/// Папка конкретного голоса: `<voices_root>/<id>/`.
+fn voice_folder(root: &std::path::Path, id: &str) -> PathBuf {
+    root.join(id)
 }
 
 /// Санирует имя пользователя в безопасный id папки:
@@ -53,18 +58,14 @@ fn sanitize_id(name: &str) -> String {
     }
 }
 
-/// Возвращает манифест голоса (`<id>.json`) либо собирает минимальный из наличия файлов.
-///
-/// Хранилище — плоское: `<voice-dir>/<id>.wav` (+ `<id>.txt`, `<id>.json`,
-/// `<id>.avatar.jpg`). Это требование CrispASR HTTP-сервера: поле `voice` в
-/// `POST /v1/audio/speech` резолвится только против `--voice-dir`, и имя не
-/// должно содержать разделителей путей (см. bug `400 invalid_voice`).
+/// Читает манифест/файлы голоса `<id>/` либо собирает минимальный из наличия файлов.
 fn read_voice(root: &std::path::Path, id: &str) -> Option<VoiceInfo> {
-    let wav = root.join(format!("{id}.wav"));
+    let folder = voice_folder(root, id);
+    let wav = folder.join("voice.wav");
     if !wav.exists() {
         return None;
     }
-    let manifest = root.join(format!("{id}.json"));
+    let manifest = folder.join("voice.json");
     let (name, ref_text, has_avatar, created_at) = if let Ok(text) =
         std::fs::read_to_string(&manifest)
     {
@@ -79,7 +80,7 @@ fn read_voice(root: &std::path::Path, id: &str) -> Option<VoiceInfo> {
         (
             id.to_string(),
             String::new(),
-            root.join(format!("{id}.avatar.jpg")).exists(),
+            folder.join("avatar.jpg").exists(),
             String::new(),
         )
     };
@@ -93,71 +94,28 @@ fn read_voice(root: &std::path::Path, id: &str) -> Option<VoiceInfo> {
     })
 }
 
-/// Однократно переносит старые голоса из подпапок `<id>/ref_audio.wav` в плоскую
-/// раскладку `<id>.wav` (требование сервера). Безопасно при отсутствии старых данных.
-fn migrate_legacy(root: &std::path::Path) {
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                let ref_wav = p.join("ref_audio.wav");
-                if ref_wav.exists() {
-                    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                        let _ = std::fs::copy(&ref_wav, root.join(format!("{name}.wav")));
-                        let _ = std::fs::copy(
-                            p.join("ref_text.txt"),
-                            root.join(format!("{name}.txt")),
-                        );
-                        let _ = std::fs::copy(
-                            p.join("avatar.jpg"),
-                            root.join(format!("{name}.avatar.jpg")),
-                        );
-                        let _ = std::fs::copy(
-                            p.join("voice.json"),
-                            root.join(format!("{name}.json")),
-                        );
-                        let _ = std::fs::remove_dir_all(&p);
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Сканирует хранилище и возвращает список сохранённых голосов.
 ///
-/// В список НЕ попадают служебные/временные файлы:
-/// - файлы, начинающиеся с `.` (скрытые);
-/// - кэш-файлы клонирования `<id>.__clone.wav` (пишутся `prepare_clone_reference`).
-/// Это предотвращает появление «истории загруженных аудио» в выпадающем списке
-/// выбора клона голоса — там должны быть только явно сохранённые голоса.
+/// Каждый голос — отдельная папка `<id>/` с файлами `voice.wav`, `ref_text.txt`,
+/// `avatar.jpg`, `voice.json`. В список НЕ попадают служебные папки (начинающиеся
+/// с `.`, напр. `.clone_cache`) и голоса без `voice.wav`.
 pub fn list_voices(models_dir: &str) -> Vec<VoiceInfo> {
     let root = voices_root(models_dir);
-    migrate_legacy(&root);
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&root) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.is_file() {
-                let fname = entry.file_name();
-                let fname_str = fname.to_string_lossy();
-                // Пропускаем скрытые и кэш-файлы клонирования.
-                if fname_str.starts_with('.') || fname_str.ends_with(".__clone.wav") {
-                    continue;
-                }
-                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                    if ext.eq_ignore_ascii_case("wav") {
-                        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
-                            // Повторная проверка на кэш по стему (на случай странных имён).
-                            if stem.ends_with(".__clone") {
-                                continue;
-                            }
-                            if let Some(info) = read_voice(&root, stem) {
-                                out.push(info);
-                            }
-                        }
-                    }
-                }
+            if !p.is_dir() {
+                continue;
+            }
+            let fname = entry.file_name();
+            let fname_str = fname.to_string_lossy();
+            // Пропускаем служебные/скрытые папки (кэш клонирования и т.п.).
+            if fname_str.starts_with('.') {
+                continue;
+            }
+            if let Some(info) = read_voice(&root, &fname_str) {
+                out.push(info);
             }
         }
     }
@@ -192,7 +150,7 @@ pub fn resolve_voice_for_server(models_dir: &str, voice: &str) -> Result<String,
     Ok(v.to_string())
 }
 
-/// Добавляет голос в хранилище.
+/// Добавляет голос в хранилище (отдельная папка `<id>/`).
 ///
 /// `src_audio` декодируется (любой формат: ogg/wav/flac/mp3/opus) и конвертируется в
 /// моно-WAV с **оригинальной** частотой дискретизации (`decode_to_mono` + `wav::write_wav`).
@@ -218,30 +176,31 @@ pub fn add_voice(
     std::fs::create_dir_all(&root)
         .map_err(|e| format!("не удалось создать папку голосов {}: {e}", root.display()))?;
 
-    // Резолвим уникальный id (с суффиксом при коллизии). Голоса теперь плоские:
-    // коллизия проверяется по `<id>.wav`.
+    // Резолвим уникальный id (с суффиксом при коллизии) по папке `<id>/`.
     let base_id = sanitize_id(name);
     let mut id = base_id.clone();
     let mut suffix = 2u32;
-    while root.join(format!("{id}.wav")).exists() {
+    while voice_folder(&root, &id).join("voice.wav").exists() {
         id = format!("{base_id}_{suffix}");
         suffix += 1;
     }
+    let folder = voice_folder(&root, &id);
+    std::fs::create_dir_all(&folder)
+        .map_err(|e| format!("не удалось создать папку голоса {}: {e}", folder.display()))?;
 
-    // Конвертация аудио -> моно WAV (ориг. частота). Плоская раскладка:
-    // `<voice-dir>/<id>.wav` — так его находит CrispASR-сервер по `--voice-dir`.
+    // Конвертация аудио -> моно WAV (ориг. частота).
     crate::modules::log::app_log(app, &format!("[voices] конвертирую «{name}» в WAV..."));
     let (mono, rate) = crate::modules::audio::decode_to_mono(src_audio)
         .map_err(|e| format!("не удалось декодировать аудио «{src_audio}»: {e}"))?;
     if mono.is_empty() {
         return Err("декодированное аудио пустое (тишина?)".into());
     }
-    let wav_path = root.join(format!("{id}.wav"));
+    let wav_path = folder.join("voice.wav");
     wav::write_wav(&wav_path.to_string_lossy(), &mono, rate)
         .map_err(|e| format!("не удалось записать WAV: {e}"))?;
 
-    // Референсный текст (сервер автоматически подхватит `<id>.txt` как ref_text).
-    let _ = std::fs::write(root.join(format!("{id}.txt")), ref_text.trim());
+    // Референсный текст.
+    let _ = std::fs::write(folder.join("ref_text.txt"), ref_text.trim());
 
     // Аватар (опционально) — просто копируем, если это похоже на картинку.
     let mut has_avatar = false;
@@ -252,7 +211,7 @@ pub fn add_voice(
             .unwrap_or("")
             .to_ascii_lowercase();
         if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
-            let _ = std::fs::copy(avatar, root.join(format!("{id}.avatar.jpg")));
+            let _ = std::fs::copy(avatar, folder.join("avatar.jpg"));
             has_avatar = true;
         }
     }
@@ -266,11 +225,11 @@ pub fn add_voice(
         "created_at": created_at,
     });
     let _ = std::fs::write(
-        root.join(format!("{id}.json")),
+        folder.join("voice.json"),
         serde_json::to_string_pretty(&manifest).unwrap_or_default(),
     );
 
-    crate::modules::log::app_log(app, &format!("[voices] голос «{name}» сохранён ({})", wav_path.display()));
+    crate::modules::log::app_log(app, &format!("[voices] голос «{name}» сохранён ({})", folder.display()));
     Ok(VoiceInfo {
         id,
         name: name.to_string(),
@@ -281,24 +240,22 @@ pub fn add_voice(
     })
 }
 
-/// Удаляет голос (плоские файлы `<id>.*` и, для совместимости, старую папку) из хранилища.
+/// Удаляет голос (папку `<id>/` и, для совместимости, старые плоские файлы) из хранилища.
 pub fn delete_voice(models_dir: &str, id: &str) -> Result<(), String> {
     let root = voices_root(models_dir);
-    let wav = root.join(format!("{id}.wav"));
-    let txt = root.join(format!("{id}.txt"));
-    let manifest = root.join(format!("{id}.json"));
-    let avatar = root.join(format!("{id}.avatar.jpg"));
-    let legacy_folder = root.join(id);
+    let folder = voice_folder(&root, id);
     let mut removed = false;
-    for f in [&wav, &txt, &manifest, &avatar] {
+    if folder.exists() {
+        let _ = std::fs::remove_dir_all(&folder);
+        removed = true;
+    }
+    // Старые плоские файлы (на случай ручного переноса).
+    for ext in ["wav", "txt", "json", "avatar.jpg"] {
+        let f = root.join(format!("{id}.{ext}"));
         if f.exists() {
             let _ = std::fs::remove_file(f);
             removed = true;
         }
-    }
-    if legacy_folder.exists() {
-        let _ = std::fs::remove_dir_all(&legacy_folder);
-        removed = true;
     }
     if !removed {
         return Err(format!("голос не найден: {id}"));
@@ -308,13 +265,12 @@ pub fn delete_voice(models_dir: &str, id: &str) -> Result<(), String> {
 
 /// Обновляет метаданные и (опц.) референсное аудио/аватар существующего голоса.
 ///
-/// `id` остаётся стабильным (важно для регистрации голоса в сервере CrispASR по
-/// `ascii_voice_name(id)`). Меняются только отображаемые поля:
-/// - `name`/`ref_text` перезаписывают манифест `<id>.json`;
+/// `id` остаётся стабильным. Меняются только отображаемые поля:
+/// - `name`/`ref_text` перезаписывают манифест `voice.json`;
 /// - `src_audio` — если непустой и файл существует, перекодируется в моно-WAV и
-///   перезаписывает `<id>.wav` + `<id>.txt` (замена референса клонирования);
-/// - `avatar` — если `"__REMOVE__"` → удаляет `<id>.avatar.jpg`; если непустой и
-///   это картинка → заменяет; иначе остаётся без изменений.
+///   перезаписывает `voice.wav` + `ref_text.txt`;
+/// - `avatar` — если `"__REMOVE__"` → удаляет `avatar.jpg`; если непустой и это
+///   картинка → заменяет; иначе остаётся без изменений.
 pub fn update_voice(
     app: &tauri::AppHandle,
     models_dir: &str,
@@ -325,7 +281,8 @@ pub fn update_voice(
     src_audio: &str,
 ) -> Result<VoiceInfo, String> {
     let root = voices_root(models_dir);
-    let wav = root.join(format!("{id}.wav"));
+    let folder = voice_folder(&root, id);
+    let wav = folder.join("voice.wav");
     if !wav.exists() {
         return Err(format!("голос не найден: {id}"));
     }
@@ -343,13 +300,13 @@ pub fn update_voice(
         }
         wav::write_wav(&wav.to_string_lossy(), &mono, rate)
             .map_err(|e| format!("не удалось записать WAV: {e}"))?;
-        let _ = std::fs::write(root.join(format!("{id}.txt")), ref_text.trim());
+        let _ = std::fs::write(folder.join("ref_text.txt"), ref_text.trim());
     }
 
     // Аватар.
-    let mut has_avatar = root.join(format!("{id}.avatar.jpg")).exists();
+    let mut has_avatar = folder.join("avatar.jpg").exists();
     if avatar == "__REMOVE__" {
-        let _ = std::fs::remove_file(root.join(format!("{id}.avatar.jpg")));
+        let _ = std::fs::remove_file(folder.join("avatar.jpg"));
         has_avatar = false;
     } else if !avatar.trim().is_empty() && std::path::Path::new(avatar).exists() {
         let ext = std::path::Path::new(avatar)
@@ -358,18 +315,18 @@ pub fn update_voice(
             .unwrap_or("")
             .to_ascii_lowercase();
         if matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
-            let _ = std::fs::copy(avatar, root.join(format!("{id}.avatar.jpg")));
+            let _ = std::fs::copy(avatar, folder.join("avatar.jpg"));
             has_avatar = true;
         }
     }
 
     // Сохраняем оригинальное время создания (из старого манифеста, если есть).
-    let prev_created = root
-        .join(format!("{id}.json"))
+    let prev_created = folder
+        .join("voice.json")
         .as_path()
         .exists()
         .then(|| {
-            std::fs::read_to_string(root.join(format!("{id}.json")))
+            std::fs::read_to_string(folder.join("voice.json"))
                 .ok()
                 .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
                 .and_then(|v| v["created_at"].as_str().map(|s| s.to_string()))
@@ -385,7 +342,7 @@ pub fn update_voice(
         "created_at": prev_created,
     });
     let _ = std::fs::write(
-        root.join(format!("{id}.json")),
+        folder.join("voice.json"),
         serde_json::to_string_pretty(&manifest).unwrap_or_default(),
     );
 
@@ -393,15 +350,15 @@ pub fn update_voice(
     read_voice(&root, id).ok_or_else(|| format!("не удалось прочитать обновлённый голос: {id}"))
 }
 
-/// Возвращает байты аватара `<id>.avatar.jpg` (JPEG) либо `None`, если его нет.
+/// Возвращает байты аватара `<id>/avatar.jpg` (JPEG) либо `None`, если его нет.
 pub fn voice_avatar(models_dir: &str, id: &str) -> Option<Vec<u8>> {
-    let p = voices_root(models_dir).join(format!("{id}.avatar.jpg"));
+    let p = voice_folder(&voices_root(models_dir), id).join("avatar.jpg");
     std::fs::read(p).ok()
 }
 
-/// Возвращает байты референсного WAV `<id>.wav` для проигрывания превью.
+/// Возвращает байты референсного WAV `<id>/voice.wav` (полный файл) для проигрывания.
 pub fn voice_audio(models_dir: &str, id: &str) -> Result<Vec<u8>, String> {
-    let p = voices_root(models_dir).join(format!("{id}.wav"));
+    let p = voice_folder(&voices_root(models_dir), id).join("voice.wav");
     std::fs::read(&p).map_err(|e| format!("не удалось прочитать аудио голоса {id}: {e}"))
 }
 
@@ -460,16 +417,18 @@ mod tests {
     #[test]
     fn sanitize_id_basic() {
         assert_eq!(sanitize_id("Morgan Freeman"), "morgan_freeman");
-        assert_eq!(sanitize_id("голос-1!"), "1");
+        // Кириллица сохраняется (важно для русскоязычных имён — папки с кириллицей
+        // валидны на Windows), не-буквенно-цифровые символы заменяются на '_'.
+        assert_eq!(sanitize_id("голос-1!"), "голос_1");
         assert_eq!(sanitize_id("  "), "voice");
-        assert_eq!(sanitize_id("Влад"), "1".to_string()); // кириллица -> "voice"? проверяем что не пусто
         assert!(!sanitize_id("Влад").is_empty());
     }
 
     #[test]
     fn resolve_does_not_pollute_store() {
-        let models = tmp_models_dir();
-        // Внешний WAV вне хранилища голосов.
+        // Изолированная папка, чтобы соседние тесты не засоряли assertions.
+        let models = tmp_models_dir().join("pollute_test");
+        let _ = std::fs::create_dir_all(&models);
         let outside = std::env::temp_dir().join(format!("outside_{}.wav", std::process::id()));
         {
             let mut f = std::fs::File::create(&outside).unwrap();
@@ -477,25 +436,31 @@ mod tests {
         }
         let res = resolve_voice_for_server(&models.to_string_lossy(), &outside.to_string_lossy());
         assert!(res.is_ok(), "resolve не должен падать на существующем файле");
-        // Никакой копии в хранилище появиться не должно.
         let vr = voices_root(&models.to_string_lossy());
         let entries: Vec<_> = std::fs::read_dir(&vr).map(|r| r.flatten().collect()).unwrap_or_default();
         assert!(entries.is_empty(), "resolve_voice_for_server не должен копировать файлы в хранилище");
         let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&models);
     }
 
     #[test]
-    fn list_voices_excludes_clone_cache_and_hidden() {
+    fn list_voices_excludes_clone_cache() {
         let models = tmp_models_dir();
         let root = voices_root(&models.to_string_lossy());
         std::fs::create_dir_all(&root).unwrap();
-        // Сохранённый голос (должен попасть).
-        std::fs::write(root.join("my_voice.wav"), b"RIFF....WAVE").unwrap();
-        std::fs::write(root.join("my_voice.json"), r#"{"name":"My Voice"}"#).unwrap();
+        // Сохранённый голос (папка) — должен попасть.
+        let vfolder = root.join("my_voice");
+        std::fs::create_dir_all(&vfolder).unwrap();
+        std::fs::write(vfolder.join("voice.wav"), b"RIFF....WAVE").unwrap();
+        std::fs::write(vfolder.join("voice.json"), r#"{"name":"My Voice"}"#).unwrap();
         // Кэш клонирования (НЕ должен попасть).
-        std::fs::write(root.join("my_voice.__clone.wav"), b"RIFF....WAVE").unwrap();
-        // Скрытый файл (НЕ должен попасть).
-        std::fs::write(root.join(".hidden.wav"), b"RIFF....WAVE").unwrap();
+        let cache = root.join(".clone_cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("my_voice.wav"), b"RIFF....WAVE").unwrap();
+        // Скрытая папка (НЕ должна попасть).
+        let hidden = root.join(".hidden");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(hidden.join("voice.wav"), b"RIFF....WAVE").unwrap();
 
         let voices = list_voices(&models.to_string_lossy());
         assert_eq!(voices.len(), 1, "в списке только сохранённый голос");

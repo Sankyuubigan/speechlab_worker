@@ -25,6 +25,35 @@
   let busy = $state(false);
   let status = $state('');
 
+  let playing = $state(false);
+  let audioEl: HTMLAudioElement | undefined = $state(undefined);
+
+  // Проигрывает ОБРЕЗАННЫЙ референс (как для клонирования, ≤ лимита бэкенда),
+  // а не полный сохранённый файл.
+  async function playTrimmed() {
+    if (!voice) return;
+    try {
+      const b = await invoke<number[]>('tts_voice_trimmed_audio', {
+        modelsDir,
+        id: voice.id,
+        backend: '',
+      });
+      const blob = new Blob([new Uint8Array(b)], { type: 'audio/wav' });
+      const url = URL.createObjectURL(blob);
+      if (audioEl) {
+        audioEl.src = url;
+        audioEl.onended = () => {
+          playing = false;
+          URL.revokeObjectURL(url);
+        };
+        playing = true;
+        await audioEl.play();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   // Компонент монтируется заново при каждом открытии (App управляет editorOpen),
   // поэтому инициализируем поля из пропа voice в эффекте (без захвата начального значения).
   $effect(() => {
@@ -115,6 +144,14 @@
     <label for="ve_text">Референсный текст (опц., улучшает качество):</label>
     <textarea id="ve_text" bind:value={refText} placeholder="что говорится в аудио"></textarea>
 
+    {#if editing && voice}
+      <div class="row">
+        <button class="play" onclick={playTrimmed} disabled={playing} title="прослушать обрезанный референс (как для клона)">
+          {playing ? '⏸…' : '▶ прослушать референс'}
+        </button>
+      </div>
+    {/if}
+
     <label for="ve_avatar">Аватар (опц.):</label>
     <div class="row">
       <button onclick={pickAvatar}>выбрать картинку</button>
@@ -134,6 +171,7 @@
       <span class="status">{status}</span>
     </div>
   </div>
+  <audio bind:this={audioEl}></audio>
 </div>
 
 <style>
@@ -226,5 +264,13 @@
   button.small {
     padding: 4px 10px;
     font-size: 12px;
+  }
+  button.play {
+    background: #89b4fa;
+    color: #1e1e2e;
+    font-weight: 600;
+  }
+  button.play:hover:not(:disabled) {
+    background: #74a0f0;
   }
 </style>

@@ -17,8 +17,6 @@
   } = $props();
 
   let avatarUrl = $state<string | null>(null);
-  let playing = $state(false);
-  let audioEl: HTMLAudioElement | undefined = $state(undefined);
 
   $effect(() => {
     let url: string | null = null;
@@ -37,25 +35,6 @@
       if (url) URL.revokeObjectURL(url);
     };
   });
-
-  async function play() {
-    try {
-      const b = await invoke<number[]>('tts_voice_audio', { modelsDir, id: voice.id });
-      const blob = new Blob([new Uint8Array(b)], { type: 'audio/wav' });
-      const url = URL.createObjectURL(blob);
-      if (audioEl) {
-        audioEl.src = url;
-        audioEl.onended = () => {
-          playing = false;
-          URL.revokeObjectURL(url);
-        };
-        playing = true;
-        await audioEl.play();
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  }
 
   function fmtDate(s: string): string {
     if (!s) return '';
@@ -79,13 +58,10 @@
   </div>
 
   <div class="vc-actions">
-    <button class="vc-play" onclick={play} disabled={playing} title="прослушать референс">▶</button>
     <button class="vc-use" onclick={() => onUse(voice.id)} title="использовать в ТТС">ТТС</button>
     <button class="vc-edit" onclick={() => onEdit(voice)} title="изменить">✎</button>
     <button class="vc-del" onclick={() => onDelete(voice.id)} title="удалить">✕</button>
   </div>
-
-  <audio bind:this={audioEl}></audio>
 </div>
 
 <style>
@@ -156,16 +132,6 @@
   .vc-actions button {
     padding: 4px 9px;
     font-size: 12px;
-  }
-  .vc-play {
-    background: #89b4fa;
-    color: #1e1e2e;
-    border: none;
-    border-radius: 6px;
-    font-weight: 700;
-  }
-  .vc-play:hover:not(:disabled) {
-    background: #74a0f0;
   }
   .vc-use {
     background: #45475a;
