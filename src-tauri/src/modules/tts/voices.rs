@@ -42,6 +42,21 @@ fn trim_to_max_sec(mono: &[f32], rate: u32) -> Vec<f32> {
     }
 }
 
+/// Приводит моно-сэмплы к каноническим 24 кГц mono (zonos/chatterbox клонируют
+/// только из 16/24 кГц mono PCM, см. логи CrispASR). При ошибке ресемпла
+/// возвращает исходные данные без изменений (не ломает сохранение голоса).
+pub fn to_24k_mono(mono: Vec<f32>, rate: u32) -> (Vec<f32>, u32) {
+    const TARGET: u32 = 24000;
+    if rate == TARGET {
+        (mono, rate)
+    } else {
+        match crate::modules::audio::denoise::resample(&mono, rate as usize, TARGET as usize) {
+            Ok(r) => (r, TARGET),
+            Err(_) => (mono, rate),
+        }
+    }
+}
+
 /// Корень хранилища голосов: `<models_dir>/voices`.
 pub fn voices_root(models_dir: &str) -> PathBuf {
     let base: PathBuf = if models_dir.is_empty() {
@@ -234,6 +249,9 @@ pub fn add_voice(
     };
     // Обрезаем референс до стандартных MAX_VOICE_REF_SEC секунд (первые N секунд).
     let mono = trim_to_max_sec(&mono, rate);
+    // Канонические 24 кГц mono PCM16: zonos/chatterbox клонируют только из
+    // 16/24 кГц mono (логи CrispASR: «Re-encode … 16 or 24 kHz mono»).
+    let (mono, rate) = to_24k_mono(mono, rate);
     let wav_path = folder.join("voice.wav");
     wav::write_wav(&wav_path.to_string_lossy(), &mono, rate)
         .map_err(|e| format!("не удалось записать WAV: {e}"))?;
@@ -355,6 +373,9 @@ pub fn update_voice(
         };
         // Обрезаем референс до стандартных MAX_VOICE_REF_SEC секунд (первые N секунд).
         let mono = trim_to_max_sec(&mono, rate);
+        // Канонические 24 кГц mono PCM16 (zonos/chatterbox клонируют только из
+        // 16/24 кГц mono, см. логи CrispASR).
+        let (mono, rate) = to_24k_mono(mono, rate);
         wav::write_wav(&wav.to_string_lossy(), &mono, rate)
             .map_err(|e| format!("не удалось записать WAV: {e}"))?;
         let _ = std::fs::write(folder.join("ref_text.txt"), ref_text.trim());

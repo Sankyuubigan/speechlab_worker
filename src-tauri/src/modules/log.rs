@@ -25,7 +25,7 @@ pub fn last_logs_path() -> PathBuf {
     let mut dir = start;
     loop {
         if dir.join("test").is_dir() {
-            return dir.join("test").join("last_logs");
+            return dir.join("test").join("last_logs.txt");
         }
         match dir.parent() {
             Some(parent) => dir = parent.to_path_buf(),
@@ -39,7 +39,7 @@ pub fn last_logs_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("test");
     let _ = std::fs::create_dir_all(&fallback);
-    fallback.join("last_logs")
+    fallback.join("last_logs.txt")
 }
 
 /// Очищает (truncate) файл last_logs при старте сессии.

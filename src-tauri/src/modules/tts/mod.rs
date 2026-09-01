@@ -488,8 +488,19 @@ impl TtsEngine {
         } else {
             String::new()
         };
-        let bytes = std::fs::read(&wav)
-            .map_err(|e| format!("не удалось прочитать файл голоса {}: {e}", wav.display()))?;
+        // CrispASR принимает референс-голос только в 16/24 кГц mono (иначе
+        // «could not open» в логах chatterbox/qwen). Исходник с записи микрофона
+        // — 44.1 кГц, поэтому декодируем, ресемплим в 24 кГц и перепаковываем
+        // в WAV перед заливкой.
+        let (mono, rate) = crate::modules::audio::decode_to_mono(&wav.to_string_lossy())
+            .map_err(|e| format!("не удалось декодировать голос {}: {e}", wav.display()))?;
+        let (mono, rate) = crate::modules::tts::voices::to_24k_mono(mono, rate);
+        let tmp = root.join(voice_id).join("voice_24k.wav");
+        crate::modules::audio::wav::write_wav(&tmp.to_string_lossy(), &mono, rate)
+            .map_err(|e| format!("не удалось записать 24кГц референс {}: {e}", tmp.display()))?;
+        let bytes = std::fs::read(&tmp)
+            .map_err(|e| format!("не удалось прочитать файл голоса {}: {e}", tmp.display()))?;
+        let _ = std::fs::remove_file(&tmp);
         self.upload_voice(app, &server_name, &bytes, &transcript).await?;
         Ok((server_name, true))
     }
@@ -603,7 +614,7 @@ fn emit_tts_caps(app: &AppHandle, language: bool) {
 /// prompt; kokoro/zonos/piper → eSpeak-голос), либо игнорируют поле без ошибки.
 /// Отправка `language` «неподдерживающему» бэкенду безопасна — поэтому список
 /// ограничен только явно language-agnostic моделями.
-fn backend_supports_language_param(backend: &str) -> bool {
+pub fn backend_supports_language_param(backend: &str) -> bool {
     !matches!(
         backend,
         "voxcpm2" | "voxcpm2-tts" | "f5-tts" | "vibevoice" | "vibevoice-tts"
@@ -740,7 +751,7 @@ mod tests {
 
     #[test]
     fn speech_body_has_no_consent_attestation() {
-        let body = build_speech_body("cosyvoice3-tts", "привет", "voice1", "", "транскрипт", 1.0);
+        let body = build_speech_body("cosyvoice3-tts", "привет", "voice1", "", "транскрипт", 1.0, false, "");
         let obj = body.as_object().unwrap();
         assert!(!obj.contains_key("consent_attestation"), "consent_attestation всё ещё в теле запроса — будет ватермарк");
         assert_eq!(obj.get("response_format").unwrap(), &serde_json::Value::String("mp3".into()));
@@ -749,7 +760,7 @@ mod tests {
         assert!(!obj.contains_key("speed"));
         assert!(obj.contains_key("voice"));
 
-        let body2 = build_speech_body("qwen3-tts", "hi", "", "", "", 1.5);
+        let body2 = build_speech_body("qwen3-tts", "hi", "", "", "", 1.5, false, "");
         let obj2 = body2.as_object().unwrap();
         assert!(!obj2.contains_key("consent_attestation"));
         assert!(!obj2.contains_key("voice"));

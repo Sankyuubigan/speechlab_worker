@@ -253,7 +253,33 @@ async fn tts_speak(
         }
     }
 
-    let use_clone = backend_clone && clone_source.is_some();
+    let needs_ref_text = crate::modules::tts::clone::backend_needs_ref_text(&backend);
+    // Для бэкендов, требующих ref_text в канале загрузки (qwen3-tts/tada), НЕ
+    // грузим WAV стартовым --voice: движок игнорирует ref_text из тела запроса
+    // и падает 500 «empty audio» (подтверждено логами). Единственный рабочий
+    // канал — заливка хранимого голоса через POST /v1/voices с полем `transcript`
+    // (см. ensure_voice). Поэтому use_clone ниже принудительно false, а body_voice
+    // маршрутизирует в ensure_voice. Raw-path WAV без хранимого голоса для qwen
+    // в этой реализации не обслуживается (нужно сначала добавить голос).
+    let is_stored_clone = clone_source
+        .as_ref()
+        .map(|(_, id)| {
+            crate::modules::tts::voices::voices_root(&settings.models_dir)
+                .join(id)
+                .join("voice.wav")
+                .exists()
+        })
+        .unwrap_or(false);
+    let use_clone = if needs_ref_text {
+        // qwen3-tts/tada: НИКОГДА не стартуем через --voice. Движок игнорирует
+        // ref_text из тела запроса и падает 500 «empty audio» (подтверждено
+        // логами). Единственный рабочий канал — заливка голоса через
+        // POST /v1/voices с полем `transcript` (ensure_voice). Поэтому
+        // use_clone=false, body_voice ниже маршрутизирует в ensure_voice.
+        false
+    } else {
+        backend_clone && clone_source.is_some()
+    };
 
     let startup_voice = if use_clone {
         // Референс грузим как `--voice` при старте сервера: cosyvoice3/zonos/
@@ -276,7 +302,9 @@ async fn tts_speak(
         })?;
         clone_ref_text = cr.ref_text;
         cr.voice_path
-    } else if voice_type == "ggupack" || voice_type == "clone" || voice_type == "clone_named" {
+    } else if (voice_type == "ggupack" || voice_type == "clone" || voice_type == "clone_named")
+        && !needs_ref_text
+    {
         // Дефолтный голосовой пак пресета (если есть) — fallback, когда
         // пользователь не дал свой WAV-референс для клонирования.
         let base = if settings.models_dir.is_empty() {
@@ -320,10 +348,19 @@ async fn tts_speak(
 
     // Голос для тела запроса — только для named (ggupack/WAV-clone уже загружены
     // при старте через --voice). Резолвим в bare-id без разделителей путей.
-    let body_voice = if voice_type == "ggupack" || use_clone {
-        String::new()
-    } else {
+    let body_voice = if voice_type == "ggupack" {
         named_voice.clone()
+    } else if needs_ref_text && is_stored_clone {
+        // qwen3-tts/tada с хранимым голосом: заливаем через ensure_voice
+        // (он шлёт transcript=ref_text + consent_attestation).
+        clone_source
+            .as_ref()
+            .map(|(_, id)| id.clone())
+            .unwrap_or_default()
+    } else if !use_clone && !named_voice.is_empty() {
+        named_voice.clone()
+    } else {
+        String::new()
     };
     let body_instruct = if supports_instruct && !instruct.is_empty() {
         instruct.clone()
@@ -351,6 +388,17 @@ async fn tts_speak(
     // случаях в теле синтеза обязателен `consent_attestation` (иначе 400
     // consent_required, см. логи chatterbox).
     let clone = use_clone || voice_uploaded;
+
+    // Если язык не задан, но бэкенд его поддерживает и пресет русскоязычный —
+    // по умолчанию русский (защита на случай, если фронт не прислал language).
+    let language = if language.trim().is_empty()
+        && crate::modules::tts::backend_supports_language_param(&backend)
+        && preset_def.map(|p| p.supports_russian).unwrap_or(false)
+    {
+        "ru".to_string()
+    } else {
+        language.clone()
+    };
 
     emit_log(&app, "ТТС: синтез речи...");
     let wav = state

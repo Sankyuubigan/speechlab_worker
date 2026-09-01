@@ -86,7 +86,20 @@ async function buildInstaller() {
 
   console.log('\n========================================');
   console.log('[4/4] Сборка release-инсталлятора (npx tauri build)...');
-  await runCommand('npx', ['tauri', 'build']);
+  // docs §2/§6.1: прямой `npx tauri build` ломается, если сброс CC/CXX/RUSTC_WRAPPER
+  // не доходит до цепочки npx -> tauri -> cargo. Форсируем окружение на границе
+  // вызова, чтобы cc-rs гарантированно использовал `cl`, а не sccache-обёртку.
+  const buildEnv = {
+    ...process.env,
+    CC: 'cl',
+    CXX: 'cl',
+    RUSTC_WRAPPER: '',
+    CARGO_BUILD_RUSTC_WRAPPER: '',
+    CMAKE_C_COMPILER_LAUNCHER: '',
+    CMAKE_CXX_COMPILER_LAUNCHER: '',
+    CMAKE_POLICY_VERSION_MINIMUM: '3.5',
+  };
+  await runCommand('npx', ['tauri', 'build'], { env: buildEnv });
 
   const bundleDir = path.join(scriptDir, 'src-tauri', 'target', 'release', 'bundle');
   console.log(`  ✅ Сборка завершена. Инсталлятор(ы) в: ${bundleDir}`);

@@ -34,6 +34,25 @@ pub fn clone_reference_limits(backend: &str) -> Option<(f32, f32)> {
     }
 }
 
+/// Бэкенды, которым для WAV-клонирования обязателен `ref_text` (транскрипт
+/// образца), и которые читают его **только** через канал загрузки голоса
+/// (`POST /v1/voices`, поле `transcript`), игнорируя поле `ref_text` в теле
+/// `POST /v1/audio/speech`. Документация CrispASR (`docs/server.md`,
+/// `docs/tts.md`): qwen3-tts Base / VoiceDesign и tada клонируют «из аудио» и
+/// берут ref_text либо из соседнего `<name>.txt` рядом с WAV, либо из
+/// `transcript` при загрузке голоса. Подача стартового `--voice <wav>` без
+/// ref_text ведёт к 500 «empty audio» (см. логи qwen3-tts).
+///
+/// Для таких бэкендов клон ведётся через upload-путь (`ensure_voice`, который
+/// шлёт `transcript`+`consent_attestation`), а не через стартовый `--voice`.
+pub fn backend_needs_ref_text(backend: &str) -> bool {
+    matches!(
+        backend,
+        "qwen3-tts" | "qwen3-tts-1.7b-base" | "qwen3-tts-1.7b-voicedesign" | "tada" | "tada-1b"
+            | "tada-3b-ml"
+    )
+}
+
 /// Подготовленный референс для клонирования.
 pub struct CloneRef {
     /// Абсолютный путь к (возможно обрезанному) WAV-референсу. Передаётся в
@@ -79,7 +98,7 @@ pub fn prepare_clone_reference(
             // Кэш клонирования — в нейтральной служебной папке (не внутри <id>/).
             let cache_dir = root.join(".clone_cache");
             let _ = std::fs::create_dir_all(&cache_dir);
-            let trimmed = cache_dir.join(format!("{cache_id}.wav"));
+            let trimmed = cache_dir.join(format!("{cache_id}.r2.wav"));
             let need_rebuild = !trimmed.exists()
                 || {
                     let src_m = std::fs::metadata(src).ok().and_then(|m| m.modified().ok());
@@ -101,10 +120,34 @@ pub fn prepare_clone_reference(
                 } else {
                     &mono[..]
                 };
-                crate::modules::audio::wav::write_wav(&trimmed.to_string_lossy(), taken, rate)
-                    .map_err(|e| format!("не удалось записать обрезанный референс: {e}"))?;
+                // Приводим референс к каноническим 24 кГц mono PCM16: zonos/chatterbox
+                // не открывают WAV в исходной частоте (логи: «failed to load voice» /
+                // «could not open … Re-encode … 16 or 24 kHz mono»).
+                const TARGET_RATE: u32 = 24000;
+                let resampled = if rate == TARGET_RATE {
+                    taken.to_vec()
+                } else {
+                    crate::modules::audio::denoise::resample(
+                        taken,
+                        rate as usize,
+                        TARGET_RATE as usize,
+                    )
+                    .map_err(|e| format!("не удалось ресемплировать референс «{id}»: {e}"))?
+                };
+                crate::modules::audio::wav::write_wav(
+                    &trimmed.to_string_lossy(),
+                    &resampled,
+                    TARGET_RATE,
+                )
+                .map_err(|e| format!("не удалось записать обрезанный референс: {e}"))?;
             }
-            (trimmed.to_string_lossy().to_string(), read_ref_text(&root, id))
+            let ref_text = read_ref_text(&root, id);
+            // Соседний .txt с ref_text — qwen3-tts/tada читают ref_text из него
+            // при загрузке WAV через стартовый --voice (fallback для raw-path WAV).
+            if !ref_text.trim().is_empty() {
+                let _ = std::fs::write(trimmed.with_extension("txt"), ref_text.trim());
+            }
+            (trimmed.to_string_lossy().to_string(), ref_text)
         }
         None => (src.to_string_lossy().to_string(), read_ref_text(&root, id)),
     };
@@ -163,12 +206,15 @@ mod tests {
 
     #[test]
     fn clone_cache_name_is_ascii() {
-        // Имя кэш-файла клона (.__clone.wav) всегда должно быть ASCII, иначе
-        // cosyvoice3 не открывает файл и падает 500.
+        // Имя кэш-файла клона (.clone_cache/<ascii>.r2.wav) всегда должно быть
+        // ASCII, иначе бэкенд не открывает файл и падает 500.
         for id in ["Влад_без_текста", "Морган Фримен", "голос-1", "voice"] {
-            let cache = format!("{}.__clone.wav", crate::modules::tts::ascii_voice_name(id));
+            let cache = format!(
+                ".clone_cache/{}.r2.wav",
+                crate::modules::tts::ascii_voice_name(id)
+            );
             assert!(cache.chars().all(|c| c.is_ascii()), "не-ASCII в кэше: {cache}");
-            assert!(cache.ends_with(".__clone.wav"));
+            assert!(cache.ends_with(".r2.wav"));
         }
     }
 }

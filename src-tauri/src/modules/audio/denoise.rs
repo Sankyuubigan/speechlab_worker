@@ -86,7 +86,7 @@ pub fn denoise_mono(samples: &[f32], rate: u32, opts: &DenoiseOpts) -> Result<Ve
 }
 
 /// Ресемплинг через FFT-ресемплер `rubato`. Для совпадения частот — копия.
-fn resample(data: &[f32], in_rate: usize, out_rate: usize) -> Result<Vec<f32>> {
+pub fn resample(data: &[f32], in_rate: usize, out_rate: usize) -> Result<Vec<f32>> {
     if in_rate == out_rate {
         return Ok(data.to_vec());
     }
