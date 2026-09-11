@@ -9,15 +9,24 @@ use tauri::{AppHandle, State};
 use serde_json::{json, Value};
 
 use modules::asr::gigaam::ModelRunner;
+use modules::stt::SttEngine;
 use modules::tts::TtsEngine;
 use modules::tts::download;
 use modules::tts::settings::{TtsSettings, load as load_tts_settings, save as save_tts_settings};
+use modules::stt::settings::SttSettings;
 
 pub struct AppState {
     pub model: Mutex<Option<Arc<ModelRunner>>>,
     pub model_dir: Mutex<String>,
     pub cancel: Arc<AtomicBool>,
     pub tts: TtsEngine,
+    pub stt: SttEngine,
+    /// Channel sender for STT hotkey events (push-to-talk lifecycle).
+    /// Runs in a dedicated thread; Tauri commands signal through this.
+    pub stt_tx: Mutex<Option<tokio::sync::mpsc::Sender<modules::stt::hotkey::HotkeyEvent>>>,
+    /// When true, HotkeyListener emits ALL key events (not just the configured hotkey).
+    /// Used for hotkey assignment: user sees every keypress in real time.
+    pub stt_capture_all: Arc<AtomicBool>,
 }
 
 fn emit_log(app: &AppHandle, msg: &str) {
@@ -624,6 +633,152 @@ fn tts_save_settings(app: AppHandle, settings: TtsSettings) -> Result<(), String
     save_tts_settings(&app, &settings)
 }
 
+// ─── STT: System-wide voice input commands ───────────────────────────
+
+#[tauri::command]
+async fn stt_get_settings() -> SttSettings {
+    SttSettings::load()
+}
+
+#[tauri::command]
+async fn stt_save_settings(app: AppHandle, settings: SttSettings) -> Result<(), String> {
+    settings.save()?;
+    crate::modules::log::app_log(
+        &app,
+        &format!(
+            "[stt] горячая клавиша сохранена: {} (code {})",
+            settings.hotkey_name, settings.hotkey_code
+        ),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn stt_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<u16, String> {
+    let settings = SttSettings::load();
+    let ws_port = state.stt.ensure(&app, &settings).await?;
+
+    let mut hotkey = modules::stt::hotkey::HotkeyListener::new(settings.hotkey_code, state.stt_capture_all.clone());
+    let mut rx = hotkey.start(&app);
+
+    let app_clone = app.clone();
+    let hotkey_code = settings.hotkey_code;
+
+    tokio::spawn(async move {
+        let mut recording = false;
+        let mut stop_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
+
+        while let Some(evt) = rx.recv().await {
+            match evt {
+                modules::stt::hotkey::HotkeyEvent::Press => {
+                    if !recording {
+                        recording = true;
+                        modules::stt::tray::emit_status(&app_clone, &modules::stt::SttStatus::Recording);
+                        modules::stt::tray::emit_key_log(&app_clone, &modules::stt::hotkey::code_to_name(hotkey_code), hotkey_code, true);
+
+                        let (tx, stop) = tokio::sync::oneshot::channel::<()>();
+                        stop_tx = Some(tx);
+
+                        let app_rec = app_clone.clone();
+                        // cpal::Stream is !Send, so we use std::thread::spawn instead of tokio::spawn.
+                        // Communication with mic thread is via channels.
+                        std::thread::spawn(move || {
+                            let mut mic = match modules::stt::mic::MicCapture::new() {
+                                Ok(m) => m,
+                                Err(e) => { modules::stt::tray::emit_status(&app_rec, &modules::stt::SttStatus::Error(e)); return; }
+                            };
+                            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
+                            if let Err(e) = mic.start(audio_tx) {
+                                modules::stt::tray::emit_status(&app_rec, &modules::stt::SttStatus::Error(e));
+                                return;
+                            }
+                            let mut ws = modules::stt::ws_client::SttWsClient::new(ws_port);
+                            if let Err(e) = ws.connect() {
+                                modules::stt::tray::emit_status(&app_rec, &modules::stt::SttStatus::Error(e));
+                                return;
+                            }
+                            // Block on channel recv + ws using a local tokio runtime
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .unwrap();
+                            rt.block_on(async {
+                                let mut stop = stop;
+                                loop {
+                                    tokio::select! {
+                                        chunk = audio_rx.recv() => {
+                                            match chunk {
+                                                Some(samples) => {
+                                                    let _ = ws.send_audio(&samples);
+                                                    while let Some(result) = ws.recv_result() {
+                                                        modules::stt::tray::emit_result(&app_rec, &result.text, result.is_final);
+                                                    }
+                                                }
+                                                None => break,
+                                            }
+                                        }
+                                        _ = &mut stop => { break; }
+                                    }
+                                }
+                            });
+                            drop(mic);
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            while let Some(result) = ws.recv_result() {
+                                modules::stt::tray::emit_result(&app_rec, &result.text, result.is_final);
+                            }
+                            ws.disconnect();
+                        });
+                    }
+                }
+                modules::stt::hotkey::HotkeyEvent::Release => {
+                    if recording {
+                        recording = false;
+                        modules::stt::tray::emit_status(&app_clone, &modules::stt::SttStatus::Transcribing);
+                        modules::stt::tray::emit_key_log(&app_clone, &modules::stt::hotkey::code_to_name(hotkey_code), hotkey_code, false);
+                        stop_tx.take();
+                        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                        modules::stt::tray::emit_status(&app_clone, &modules::stt::SttStatus::Listening);
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(ws_port)
+}
+
+#[tauri::command]
+async fn stt_stop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.stt.stop(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn stt_get_status(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(match state.stt.status() {
+        modules::stt::SttStatus::Stopped => "stopped",
+        modules::stt::SttStatus::Starting => "starting",
+        modules::stt::SttStatus::Listening => "listening",
+        modules::stt::SttStatus::Recording => "recording",
+        modules::stt::SttStatus::Transcribing => "transcribing",
+        modules::stt::SttStatus::Error(_) => "error",
+    }
+    .to_string())
+}
+
+#[tauri::command]
+async fn stt_inject_text(text: String) -> Result<(), String> {
+    modules::stt::inject::inject_text(&text)
+}
+
+// ─── Main entry ──────────────────────────────────────────────────────
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -641,6 +796,9 @@ pub fn run() {
             model_dir: Mutex::new(String::new()),
             cancel: Arc::new(AtomicBool::new(false)),
             tts: TtsEngine::new(),
+            stt: SttEngine::new(),
+            stt_tx: Mutex::new(None),
+            stt_capture_all: Arc::new(AtomicBool::new(false)),
         })
         .invoke_handler(tauri::generate_handler![
             set_model_dir,
@@ -666,7 +824,13 @@ pub fn run() {
             tts_check_update,
             tts_default_dirs,
             tts_get_settings,
-            tts_save_settings
+            tts_save_settings,
+            stt_get_settings,
+            stt_save_settings,
+            stt_start,
+            stt_stop,
+            stt_get_status,
+            stt_inject_text,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

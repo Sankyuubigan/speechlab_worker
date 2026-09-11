@@ -157,12 +157,38 @@ fn asset_slug(name: &str) -> Option<String> {
 
 /// Классифицирует Windows-ассет движка. Возвращает `(id, label)`.
 ///
-/// `id` — уникальный slug ассета (используется как имя папки и ключ бэкенда),
-/// поэтому два разных CUDA-билда (`cuda` и `cuda-non-cuda`) НЕ сливаются в один пункт.
-/// `label` — человекочитаемая подпись; если у одной категории несколько вариантов,
-/// к ней дописывается различающий суффикс в скобках (напр. `NVIDIA CUDA (GPU) [non-cuda]`).
+/// `id` — уникальный slug ассета (используется как имя папки и ключ бэкенда).
+/// `label` — человекочитаемая подпись. Для CUDA-пунктов подпись объясняет
+/// версию тулкита (12/13) и для каких видеокарт он подходит.
+///
+/// Варианты `-non-cuda` (CUDA-билд без трёх runtime-DLL `cudart/cublas/cublasLt`)
+/// намеренно исключаются: приложение распаковывает движок в чистую папку и не
+/// раскладывает эти DLL рядом с `crispasr.exe`, поэтому такие сборки из коробки
+/// не работают — мёртвый функционал.
 fn classify_backend(name: &str) -> Option<(String, String)> {
     let slug = asset_slug(name)?;
+
+    // Два разных CUDA-билда с DLL (cuda, cuda13) НЕ сливаются в один пункт —
+    // остаются отдельными. А `-non-cuda` полностью выпадает из списка.
+    if slug.contains("non-cuda") {
+        return None;
+    }
+
+    // CUDA-пункты подписываем развёрнуто: версия тулкита + совместимость с картами.
+    // Внимание: эти ветки ДО общих проверок `contains("cuda")`, а guard `non-cuda` выше
+    // уже отсеял сборки без DLL.
+    if slug.starts_with("cuda13") {
+        return Some((
+            slug,
+            "NVIDIA CUDA (GPU) — CUDA 13, для новых видеокарт (RTX 20+)".to_string(),
+        ));
+    }
+    if slug.starts_with("cuda") {
+        return Some((
+            slug,
+            "NVIDIA CUDA (GPU) — CUDA 12, для старых видеокарт".to_string(),
+        ));
+    }
 
     let (cat, detail) = if slug.starts_with("cpu-legacy") {
         ("CPU (legacy SSE2)", slug.strip_prefix("cpu-legacy").unwrap_or(""))
@@ -444,6 +470,34 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
         .extract(dest.to_path_buf())
         .map_err(|e| format!("ошибка распаковки: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_cuda_variants_are_filtered_out() {
+        // Мёртвый функционал: показываем только self-contained CUDA-билды.
+        assert!(classify_backend("crispasr-windows-x86_64-cuda-non-cuda.zip").is_none());
+        assert!(classify_backend("crispasr-windows-x86_64-cuda13-non-cuda.zip").is_none());
+        assert!(classify_backend("crispasr-windows-x86_64-cuda13-non-cuda-more.zip").is_none());
+    }
+
+    #[test]
+    fn self_contained_backends_are_kept() {
+        let (id, label) = classify_backend("crispasr-windows-x86_64-cuda.zip").unwrap();
+        assert_eq!(id, "cuda");
+        assert_eq!(label, "NVIDIA CUDA (GPU) — CUDA 12, для старых видеокарт");
+
+        let (id, label) = classify_backend("crispasr-windows-x86_64-cuda13.zip").unwrap();
+        assert_eq!(id, "cuda13");
+        assert_eq!(label, "NVIDIA CUDA (GPU) — CUDA 13, для новых видеокарт (RTX 20+)");
+
+        let (id, label) = classify_backend("crispasr-windows-x86_64-vulkan.zip").unwrap();
+        assert_eq!(id, "vulkan");
+        assert_eq!(label, "Vulkan (GPU)");
+    }
 }
 
 /// Рекурсивно ищет `crispasr.exe` (zip может класть в подпапку).

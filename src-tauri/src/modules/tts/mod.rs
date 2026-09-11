@@ -636,7 +636,7 @@ impl Drop for TtsEngine {
 /// Убирает ANSI-эскейп-последовательности и лишние `\r` из stderr движка, чтобы
 /// `test/last_logs` оставался чистым текстом (без управляющих кодов, которые
 /// ломают отображение файла как текстового).
-fn sanitize_crispasr_line(s: &str) -> String {
+pub fn sanitize_crispasr_line(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {

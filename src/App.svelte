@@ -6,7 +6,7 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import VoiceStorage from './lib/VoiceStorage.svelte';
 
-  let activeTab = $state<'main' | 'tts' | 'settings' | 'logs'>('main');
+  let activeTab = $state<'main' | 'tts' | 'stt' | 'settings' | 'logs'>('main');
   let modelDir = $state('D:\\nn\\models\\stt\\gigaam-v3');
   let dropFiles = $state<string[]>([]);
   let status = $state('');
@@ -58,6 +58,17 @@
 
   let draggedIdx = $state<number | null>(null);
   let logs = $state<string[]>([]);
+
+  // --- STT (voice input) state ---
+  let sttStatus = $state('stopped'); // stopped, starting, listening, recording, transcribing, error
+  let sttHotkeyName = $state('Period');
+  let sttHotkeyCode = $state(83);
+  let sttBackend = $state('gigaam');
+  let sttResult = $state('');
+  let sttPartial = $state('');
+  let sttKeyLog = $state<{ name: string; code: number; pressed: boolean } | null>(null);
+  let sttAssigning = $state(false); // true = waiting for keypress to assign hotkey
+  let sttAssignUnlisten: (() => void) | null = null; // cleanup for keydown capture listener
 
   const selectedPreset = $derived(ttsPresets.find(p => p.id === ttsPreset));
   const vt = $derived(selectedPreset?.voice_type);
@@ -159,11 +170,40 @@
         refreshVoices();
       });
 
+    // STT events
+    const unlistenSttStatus = listen<string>('stt-status', (event) => {
+      sttStatus = event.payload;
+    });
+    const unlistenSttResult = listen<{ text: string; final: boolean }>('stt-result', (event) => {
+      if (event.payload.final) {
+        sttResult += (sttResult ? '\n' : '') + event.payload.text;
+        sttPartial = '';
+      } else {
+        sttPartial = event.payload.text;
+      }
+    });
+    const unlistenSttKey = listen<{ name: string; code: number; pressed: boolean }>('stt-key', (event) => {
+      sttKeyLog = event.payload;
+    });
+
+    // Load STT settings
+    invoke<{ hotkey_code: number; hotkey_name: string; backend: string }>('stt_get_settings')
+      .then((s) => {
+        sttHotkeyCode = s.hotkey_code;
+        sttHotkeyName = s.hotkey_name;
+        sttBackend = s.backend;
+      })
+      .catch(() => {});
+
     return () => {
       unlistenDrop.then(fn => fn());
       unlistenLog.then(fn => fn());
       unlistenDl.then(fn => fn());
       unlistenCaps.then(fn => fn());
+      unlistenSttStatus.then(fn => fn());
+      unlistenSttResult.then(fn => fn());
+      unlistenSttKey.then(fn => fn());
+      sttAssignUnlisten?.();
     };
   });
 
@@ -408,6 +448,129 @@
     catch (e) { ttsStatus = 'ошибка выгрузки: ' + String(e); }
   }
 
+  // --- STT functions ---
+  async function sttStart() {
+    try {
+      sttStatus = 'starting';
+      sttResult = '';
+      sttPartial = '';
+      await invoke('stt_start');
+    } catch (e) {
+      sttStatus = 'error';
+      sttResult = 'Ошибка: ' + String(e);
+    }
+  }
+
+  async function sttStop() {
+    try {
+      await invoke('stt_stop');
+      sttStatus = 'stopped';
+    } catch (e) {
+      sttResult = 'Ошибка остановки: ' + String(e);
+    }
+  }
+
+  async function sttSaveHotkey() {
+    try {
+      await invoke('stt_save_settings', {
+        settings: {
+          hotkey_code: sttHotkeyCode,
+          hotkey_name: sttHotkeyName,
+          engine_exe: '',
+          backend: sttBackend,
+          model: 'auto',
+          ws_port: 0,
+          stream_step_ms: 3000,
+          stream_length_ms: 10000,
+          vad: true,
+        }
+      });
+    } catch { /* */ }
+  }
+
+  // Mirrors Rust `hotkey.rs::key_to_u32`/`code_to_name`: converts a DOM
+  // KeyboardEvent into { name, code } where `code` matches the VK value the
+  // Rust HotkeyListener compares against (event.code == rdev physical key == VK).
+  function sttCodeFromEvent(e: KeyboardEvent) {
+    const c = e.code;
+    if (/^Key[A-Z]$/.test(c)) return { name: c.slice(3), code: c.charCodeAt(3) };
+    if (/^Digit[0-9]$/.test(c)) return { name: c.slice(5), code: c.charCodeAt(5) };
+    if (/^F(?:[1-9]|1[0-2])$/.test(c)) return { name: c, code: 0x6f + parseInt(c.slice(1), 10) };
+    const n: Record<string, { name: string; code: number }> = {
+      Comma: { name: ',', code: 0xBC }, Period: { name: '.', code: 0xBE },
+      Slash: { name: '/', code: 0xBF }, Semicolon: { name: ';', code: 0xBA },
+      Quote: { name: "'", code: 0xDE }, BracketLeft: { name: '[', code: 0xDB },
+      BracketRight: { name: ']', code: 0xDD }, Backslash: { name: '\\', code: 0xDC },
+      Backquote: { name: '`', code: 0xC0 }, Minus: { name: '-', code: 0xBD },
+      Equal: { name: '=', code: 0xBB }, IntlBackslash: { name: '\\', code: 0xDC },
+      Backspace: { name: 'Backspace', code: 0x08 }, Tab: { name: 'Tab', code: 0x09 },
+      Enter: { name: 'Enter', code: 0x0D }, Escape: { name: 'Escape', code: 0x1B },
+      Space: { name: 'Space', code: 0x20 }, Delete: { name: 'Delete', code: 0x2E },
+      Insert: { name: 'Insert', code: 0x2D }, Home: { name: 'Home', code: 0x24 },
+      End: { name: 'End', code: 0x23 }, PageUp: { name: 'PageUp', code: 0x21 },
+      PageDown: { name: 'PageDown', code: 0x22 },
+      ArrowLeft: { name: 'Left', code: 0x25 }, ArrowUp: { name: 'Up', code: 0x26 },
+      ArrowRight: { name: 'Right', code: 0x27 }, ArrowDown: { name: 'Down', code: 0x28 },
+      PrintScreen: { name: 'PrintScreen', code: 0x2C }, ScrollLock: { name: 'ScrollLock', code: 0x91 },
+      Pause: { name: 'Pause', code: 0x13 }, CapsLock: { name: 'CapsLock', code: 0x14 },
+      AltLeft: { name: 'LAlt', code: 0xA2 }, AltRight: { name: 'RAlt', code: 0xA4 },
+      ShiftLeft: { name: 'LShift', code: 0xA0 }, ShiftRight: { name: 'RShift', code: 0xA1 },
+      ControlLeft: { name: 'LCtrl', code: 0xA3 }, ControlRight: { name: 'RCtrl', code: 0xA5 },
+      MetaLeft: { name: 'LWin', code: 0x5B }, MetaRight: { name: 'RWin', code: 0x5C },
+    };
+    return n[c] ?? null;
+  }
+
+  function sttStartAssign() {
+    sttAssigning = true;
+    sttKeyLog = null;
+    sttAssignUnlisten?.();
+    const handler = (e: KeyboardEvent) => {
+      const info = sttCodeFromEvent(e);
+      if (!info) return;
+      e.preventDefault();
+      e.stopPropagation();
+      sttKeyLog = { name: info.name, code: info.code, pressed: true };
+    };
+    window.addEventListener('keydown', handler, { capture: true });
+    sttAssignUnlisten = () => window.removeEventListener('keydown', handler, { capture: true });
+  }
+
+  async function sttConfirmAssign() {
+    sttAssigning = false;
+    sttAssignUnlisten?.();
+    sttAssignUnlisten = null;
+    if (sttKeyLog) {
+      sttHotkeyCode = sttKeyLog.code;
+      sttHotkeyName = sttKeyLog.name;
+      await sttSaveHotkey();
+    }
+  }
+
+  function sttCancelAssign() {
+    sttAssigning = false;
+    sttAssignUnlisten?.();
+    sttAssignUnlisten = null;
+    sttKeyLog = null;
+  }
+
+  const sttStatusColor = $derived(
+    sttStatus === 'recording' ? '#f38ba8' :
+    sttStatus === 'listening' ? '#a6e3a1' :
+    sttStatus === 'transcribing' ? '#f9e2af' :
+    sttStatus === 'starting' ? '#89b4fa' :
+    sttStatus === 'error' ? '#f38ba8' : '#585b70'
+  );
+
+  const sttStatusText = $derived(
+    sttStatus === 'stopped' ? 'Остановлен' :
+    sttStatus === 'starting' ? 'Запуск...' :
+    sttStatus === 'listening' ? 'Слушаю. Нажмите кнопку голоса.' :
+    sttStatus === 'recording' ? 'Запись... Говорите!' :
+    sttStatus === 'transcribing' ? 'Распознавание...' :
+    sttStatus === 'error' ? 'Ошибка' : sttStatus
+  );
+
   function dlPercent() { return dl.total ? Math.min(100, (dl.current / dl.total) * 100) : 0; }
 </script>
 
@@ -417,6 +580,7 @@
   <div class="tabs">
     <button class:active={activeTab === 'main'} onclick={() => activeTab = 'main'}>Распознавание</button>
     <button class:active={activeTab === 'tts'} onclick={() => activeTab = 'tts'}>ТТС</button>
+    <button class:active={activeTab === 'stt'} onclick={() => activeTab = 'stt'}>Голосовой ввод</button>
     <button class:active={activeTab === 'settings'} onclick={() => activeTab = 'settings'}>⚙ Настройки</button>
     <button class:active={activeTab === 'logs'} onclick={() => activeTab = 'logs'}>Логи ({logs.length})</button>
   </div>
@@ -599,6 +763,95 @@
       </div>
 
       <audio bind:this={audioEl}></audio>
+    </section>
+
+  {:else if activeTab === 'stt'}
+    <section class="tts-section">
+      <h2>Голосовой ввод (push-to-talk)</h2>
+
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px;">
+        <div style="width:12px; height:12px; border-radius:50%; background:{sttStatusColor}; box-shadow:0 0 8px {sttStatusColor};"></div>
+        <span style="font-size:14px;">{sttStatusText}</span>
+      </div>
+
+      <div style="display:flex; gap:10px; margin-bottom:20px;">
+        {#if sttStatus === 'stopped' || sttStatus === 'error'}
+          <button onclick={sttStart} style="padding:10px 24px; background:#89b4fa; color:#1e1e2e; border:none; border-radius:8px; cursor:pointer; font-weight:600;">Запустить</button>
+        {:else}
+          <button onclick={sttStop} style="padding:10px 24px; background:#f38ba8; color:#1e1e2e; border:none; border-radius:8px; cursor:pointer; font-weight:600;">Остановить</button>
+        {/if}
+      </div>
+
+      <h3 style="font-size:15px; margin:14px 0 8px; opacity:0.85;">Настройки</h3>
+
+      <div style="margin-bottom:12px;">
+        <label style="font-size:13px; opacity:0.7;">Горячая клавиша:</label>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:4px;">
+          {#if sttAssigning}
+            <div style="padding:6px 12px; border-radius:6px; border:2px solid #f9e2af; background:#313244; color:#f9e2af; width:120px; text-align:center; font-weight:600;">
+              {sttKeyLog ? sttKeyLog.name : '...'}
+            </div>
+            <button onclick={sttConfirmAssign}
+              style="padding:6px 14px; background:#a6e3a1; color:#1e1e2e; border:none; border-radius:6px; cursor:pointer; font-weight:600; font-size:13px;">
+              Сохранить
+            </button>
+            <button onclick={sttCancelAssign}
+              style="padding:6px 14px; background:#45475a; color:#cdd6f4; border:none; border-radius:6px; cursor:pointer; font-size:13px;">
+              Отмена
+            </button>
+          {:else}
+            <input
+              type="text"
+              readonly
+              value={sttHotkeyName}
+              style="padding:6px 12px; border-radius:6px; border:1px solid #45475a; background:#313244; color:#cdd6f4; width:120px; text-align:center;"
+            />
+            <button onclick={sttStartAssign}
+              style="padding:6px 14px; background:#89b4fa; color:#1e1e2e; border:none; border-radius:6px; cursor:pointer; font-size:13px;">
+              Назначить
+            </button>
+          {/if}
+        </div>
+        {#if sttAssigning}
+          <div style="font-size:12px; color:#f9e2af; margin-top:6px;">Нажмите клавишу на клавиатуре или пульте...</div>
+        {/if}
+      </div>
+
+      {#if !sttAssigning && sttKeyLog}
+        <div style="font-size:12px; color:#585b70; margin-bottom:12px;">
+          Последнее нажатие: <strong>{sttKeyLog.name}</strong> (code: {sttKeyLog.code}) — {sttKeyLog.pressed ? 'нажата' : 'отпущена'}
+        </div>
+      {/if}
+
+      <div style="margin-bottom:12px;">
+        <label style="font-size:13px; opacity:0.7;">Backend:</label>
+        <select bind:value={sttBackend} onchange={sttSaveHotkey}
+          style="margin-top:4px; padding:8px; border-radius:6px; border:1px solid #45475a; background:#313244; color:#cdd6f4; width:200px;">
+          <option value="gigaam">gigaam (русский)</option>
+        </select>
+      </div>
+
+      <h3 style="font-size:15px; margin:14px 0 8px; opacity:0.85;">Результат</h3>
+
+      <textarea
+        readonly
+        value={sttResult + (sttPartial ? (sttResult ? '\n' : '') + sttPartial + '...' : '')}
+        style="width:100%; box-sizing:border-box; background:#1e1e2e; color:#a6adc8; border:1px solid #45475a; border-radius:8px; padding:14px; font-family:system-ui, sans-serif; font-size:14px; resize:vertical; line-height:1.5; outline:none; height:200px;"
+        placeholder="Распознанный текст появится здесь..."
+      ></textarea>
+
+      {#if sttResult}
+        <div style="margin-top:8px;">
+          <button onclick={() => { navigator.clipboard.writeText(sttResult); }}
+            style="padding:6px 14px; background:#45475a; color:#cdd6f4; border:none; border-radius:6px; cursor:pointer; font-size:13px;">
+            Копировать
+          </button>
+          <button onclick={() => { sttResult = ''; sttPartial = ''; }}
+            style="padding:6px 14px; background:#45475a; color:#cdd6f4; border:none; border-radius:6px; cursor:pointer; font-size:13px;">
+            Очистить
+          </button>
+        </div>
+      {/if}
     </section>
 
   {:else if activeTab === 'settings'}
