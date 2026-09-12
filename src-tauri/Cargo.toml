@@ -23,24 +23,16 @@ tokio = { version = "1", features = ["full"] }
 
 # Audio
 symphonia = { version = "0.6", features = ["ogg", "vorbis", "wav", "pcm", "flac", "mp3"] }
-hound = "3"
 anyhow = "1"
 opus = "0.3"
 ogg = "0.9"
-
-# Шумоподавление (RNNoise, чистый Rust, без системных зависимостей)
-nnnoiseless = "0.5"
-rubato = "5"
-audioadapter-buffers = "5"
 
 # ONNX inference
 ort = "2.0.0-rc.12"
 ndarray = "0.17"
 
-# CrispASR TTS engine (HTTP client only; engine runs as separate prebuilt subprocess)
-reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
-futures = "0.3"
-zip = "2"
+# CrispASR engine (TTS/STT) как отдельный prebuilt-процесс + HTTP — см. tauri-plugin-speech
+tauri-plugin-speech = { path = "../../my-tauri-plugins/tauri-plugin-speech" }
 
 # STT: system-wide voice input (push-to-talk)
 rdev = "0.5"                               # global hotkey listener

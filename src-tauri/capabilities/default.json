@@ -10,6 +10,7 @@
     "dialog:allow-open",
     "opener:default",
     "updater:default",
-    "core:event:default"
+    "core:event:default",
+    "speech:default"
   ]
 }

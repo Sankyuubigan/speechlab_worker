@@ -16,7 +16,8 @@
         "title": "SpeechLab — ASR",
         "width": 900,
         "height": 700,
-        "dragDropEnabled": true
+        "dragDropEnabled": true,
+        "additionalBrowserArgs": "--remote-debugging-port=9223 --remote-allow-origins=*"
       }
     ],
     "security": {
@@ -36,6 +37,10 @@
     "createUpdaterArtifacts": true
   },
   "plugins": {
+    "speech": {
+      "default_engine_dir": "D:\\nn\\crispasr",
+      "default_models_dir": "D:\\nn\\models\\tts"
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCMEZGRUE5MUIxQjVGQzUKUldURlh4c2JxZjRQYS9Bc1hUckFGUmoxTnRoNGY1ZytROTRRbTF4T09aUnZCcDlBTzNRTkQydWoK",
       "endpoints": [

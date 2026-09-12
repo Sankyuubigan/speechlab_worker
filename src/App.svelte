@@ -4,7 +4,6 @@
   import { listen } from '@tauri-apps/api/event';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
-  import VoiceStorage from './lib/VoiceStorage.svelte';
 
   let activeTab = $state<'main' | 'tts' | 'stt' | 'settings' | 'logs'>('main');
   let modelDir = $state('D:\\nn\\models\\stt\\gigaam-v3');
@@ -82,7 +81,7 @@
 
   async function saveSettings() {
     try {
-      await invoke('tts_save_settings', {
+      await invoke('plugin:speech|tts_save_settings', {
         settings: {
           engine_dir: ttsEngineDir,
           models_dir: ttsModelsDir,
@@ -95,20 +94,20 @@
 
   async function refreshModels() {
     try {
-      installedModels = await invoke('tts_list_models', { modelsDir: ttsModelsDir });
+      installedModels = await invoke('plugin:speech|tts_list_models', { modelsDir: ttsModelsDir });
     } catch { installedModels = []; }
   }
 
   async function refreshVoices() {
     if (!ttsModelsDir) { ttsVoices = []; return; }
     try {
-      ttsVoices = await invoke('tts_list_voices', { modelsDir: ttsModelsDir });
+      ttsVoices = await invoke('plugin:speech|tts_list_voices', { modelsDir: ttsModelsDir });
     } catch { ttsVoices = []; }
   }
 
   async function refreshEngineStatus() {
     try {
-      engineStatus = await invoke('tts_check_update');
+      engineStatus = await invoke('plugin:speech|tts_check_update');
     } catch { /* */ }
   }
 
@@ -139,15 +138,15 @@
       ttsCaps = event.payload;
     });
 
-    invoke<{ id: string; label: string; backend: string; has_codec: boolean; has_voice: boolean; voice_type: string; builtin_voices: string[]; supports_instruct: boolean; supports_russian: boolean; size: string }[]>('tts_presets')
+    invoke<{ id: string; label: string; backend: string; has_codec: boolean; has_voice: boolean; voice_type: string; builtin_voices: string[]; supports_instruct: boolean; supports_russian: boolean; size: string }[]>('plugin:speech|tts_presets')
       .then((p) => { ttsPresets = p; })
       .catch(() => {});
 
-    invoke<{ id: string; label: string; asset_name: string; url: string; tag: string }[]>('tts_engine_backends')
+    invoke<{ id: string; label: string; asset_name: string; url: string; tag: string }[]>('plugin:speech|tts_engine_backends')
       .then((b) => { ttsEngineBackends = b; })
       .catch(() => {});
 
-    invoke<{ engine_dir: string; models_dir: string; engine_backend: string; preset: string }>('tts_get_settings')
+    invoke<{ engine_dir: string; models_dir: string; engine_backend: string; preset: string }>('plugin:speech|tts_get_settings')
       .then((s) => {
         if (s.engine_dir) ttsEngineDir = s.engine_dir;
         if (s.models_dir) ttsModelsDir = s.models_dir;
@@ -156,7 +155,7 @@
       })
       .catch(() => {});
 
-    invoke<{ engine_dir: string; models_dir: string }>('tts_default_dirs')
+    invoke<{ engine_dir: string; models_dir: string }>('plugin:speech|tts_default_dirs')
       .then((d) => {
         if (!ttsEngineDir) ttsEngineDir = d.engine_dir;
         if (!ttsModelsDir) ttsModelsDir = d.models_dir;
@@ -319,7 +318,7 @@
     if (!ttsEngineBackend) { ttsStatus = 'выберите бэкенд'; return; }
     dlBusy = true; ttsStatus = 'скачиваю движок...';
     try {
-      await invoke<string>('tts_download_engine', { backendId: ttsEngineBackend, dest: ttsEngineDir });
+      await invoke<string>('plugin:speech|tts_download_engine', { backendId: ttsEngineBackend, dest: ttsEngineDir });
       ttsStatus = 'движок скачан';
       await refreshEngineStatus();
     } catch (e) { ttsStatus = 'ошибка: ' + String(e); }
@@ -342,7 +341,7 @@
     if (!ttsModelsDir) { ttsStatus = 'укажите папку моделей в Настройках'; return; }
     dlBusy = true; ttsStatus = `скачиваю модель (${presetId})...`;
     try {
-      await invoke('tts_download_model', { preset: presetId, dest: ttsModelsDir });
+      await invoke('plugin:speech|tts_download_model', { preset: presetId, dest: ttsModelsDir });
       ttsStatus = 'модель скачана';
       await refreshModels();
     } catch (e) { ttsStatus = 'ошибка: ' + String(e); }
@@ -360,7 +359,7 @@
     ttsGenTime = 0;
     ttsStatus = 'готовлю движок...';
     try {
-      const res = await invoke<{ wav: number[] | Uint8Array; seconds: number }>('tts_speak', {
+      const res = await invoke<{ wav: number[] | Uint8Array; seconds: number }>('plugin:speech|tts_speak', {
         preset: ttsPreset,
         voice: ttsVoice,
         instruct: selectedPreset.supports_instruct ? ttsInstruct : '',
@@ -436,7 +435,7 @@
     });
     if (!path) return;
     try {
-      await invoke('tts_save_wav', { path, data: Array.from(lastTtsWav) });
+      await invoke('plugin:speech|tts_save_wav', { path, data: Array.from(lastTtsWav) });
       ttsStatus = 'MP3 сохранён: ' + path;
     } catch (e) {
       ttsStatus = 'ошибка сохранения: ' + String(e);
@@ -444,7 +443,7 @@
   }
 
   async function ttsUnload() {
-    try { await invoke('tts_unload'); ttsStatus = 'движок выгружен'; }
+    try { await invoke('plugin:speech|tts_unload'); ttsStatus = 'движок выгружен'; }
     catch (e) { ttsStatus = 'ошибка выгрузки: ' + String(e); }
   }
 
@@ -859,68 +858,17 @@
       <h2>Настройки — движок CrispASR (TTS)</h2>
 
       <h3>Движок</h3>
-      <label for="tts_backend">Тип бэкенда:</label>
-      <div class="row">
-        <select id="tts_backend" bind:value={ttsEngineBackend} onchange={() => { saveSettings(); refreshEngineStatus(); }}>
-          {#each ttsEngineBackends as b}
-            <option value={b.id}>{b.label}</option>
-          {/each}
-        </select>
-        {#if !ttsEngineBackends.length}
-          <span class="status">не удалось получить список бинарей (нет сети?)</span>
-        {/if}
-      </div>
-
-      <p class="hint">
-        Статус: {selectedEngine ? (selectedEngine.installed ? `установлен (${selectedEngine.installed_version ?? '?'})` : 'не установлен') : '—'}
-      </p>
-
-      <div class="row">
-        <button class="primary" onclick={downloadEngine} disabled={dlBusy || !ttsEngineBackends.length}>скачать движок</button>
-        <button onclick={checkUpdate} disabled={dlBusy}>проверить обновления</button>
-        <button onclick={pickEngineDir}>изменить путь к движку</button>
-      </div>
-      <p class="hint">Путь к движку: <code>{ttsEngineDir}</code></p>
-      {#if updateInfo}<p class="hint">{updateInfo}</p>{/if}
+      <speech-engine-panel></speech-engine-panel>
 
       <hr />
 
-      <h3>Папка моделей TTS</h3>
-      <div class="row">
-        <input bind:value={ttsModelsDir} placeholder="общая папка для моделей TTS" readonly />
-        <button onclick={pickModelsDir}>выбрать папку</button>
-      </div>
-      <p class="hint">Внутри создаётся подпапка на каждый пресет; все GGUF качаются туда автоматически.</p>
-
-      <h4>Установленные модели:</h4>
-      <ul class="models">
-        {#each installedModels as m}
-          <li>
-            <span class="mname">{m.label}{(m.voice_type === 'clone' || m.voice_type === 'clone_named') ? ' 🎭' : ''}</span>
-            <span class="badges">
-              <span class="badge">{m.size}</span>
-              {#if m.supports_russian}<span class="badge ru">RU</span>{/if}
-              {#if m.installed}
-                <span class="badge ok"><span class="dot"></span>установлено</span>
-              {:else}
-                <button class="small" onclick={() => downloadModel(m.id)} disabled={dlBusy}>скачать</button>
-              {/if}
-            </span>
-          </li>
-        {/each}
-      </ul>
-      {#if dlBusy || dl.total > 0}
-        <div class="row">
-          <span class="status">скачивание: {dl.name} — {Math.round(dlPercent())}%</span>
-        </div>
-        <div class="progress-wrap">
-          <div class="progress-bar" style="width: {dlPercent()}%"></div>
-        </div>
-      {/if}
+      <h3>Модели TTS</h3>
+      <speech-models-panel models-dir={ttsModelsDir}></speech-models-panel>
 
       <hr />
 
-      <VoiceStorage voices={ttsVoices} modelsDir={ttsModelsDir} onChanged={refreshVoices} onUseInTts={(id) => { ttsStoredVoiceId = id; ttsVoice = id; }} />
+      <h3>Хранилище голосов</h3>
+      <speech-voice-storage models-dir={ttsModelsDir}></speech-voice-storage>
 
       <span class="status">{ttsStatus}</span>
     </section>
@@ -937,6 +885,21 @@
 </main>
 
 <style>
+  /* Контракт темы плагина tauri-plugin-speech: CSS-переменные наследуются
+     сквозь Shadow DOM Web Components, поэтому задаём их на :root.
+     Без них плашки движка/моделей/голосов падают в светлые фолбэки
+     (чёрный текст на тёмном фоне). */
+  :global(:root) {
+    --text: #cdd6f4;
+    --text-muted: #7f849c;
+    --border: #45475a;
+    --panel-bg: #181825;
+    --bg-color: #313244;
+    --session-hover: #313244;
+    --primary: #89b4fa;
+    --primary-hover: #74a0f0;
+    --font: system-ui, sans-serif;
+  }
   :global(body) { font-family: system-ui, sans-serif; margin: 0; background: #1e1e2e; color: #cdd6f4; color-scheme: dark; }
   /* Гарантируем светлый цвет всех заголовков независимо от системной темы
      (раньше дефолтный scaffold-app.css задавал им чёрный цвет в light mode). */
@@ -991,7 +954,6 @@
   .status { opacity: 0.8; font-size: 14px; margin-left: 8px; }
   .hint { opacity: 0.65; font-size: 13px; margin: 4px 0 10px; }
   .hint.warn { color: #f9e2af; }
-  code { background: #313244; padding: 1px 6px; border-radius: 4px; word-break: break-all; color: #cdd6f4; }
 
   .progress-wrap { height: 6px; background: #313244; border-radius: 4px; margin: 15px 0 20px; overflow: hidden; width: 100%; }
   .progress-bar { height: 100%; background: #89b4fa; transition: width 0.3s ease; }
@@ -1009,19 +971,8 @@
 
   .settings-section h2 { font-size: 18px; margin: 0 0 14px; }
   .settings-section h3 { font-size: 15px; margin: 14px 0 8px; opacity: 0.85; }
-  .settings-section h4 { font-size: 14px; margin: 12px 0 6px; opacity: 0.8; }
   select { flex: 1; min-width: 240px; padding: 8px; border-radius: 6px; border: 1px solid #45475a; background: #313244; color: #cdd6f4; }
   select option { background: #313244; color: #cdd6f4; }
   input[type="range"] { accent-color: #89b4fa; }
   .settings-section hr { border: none; border-top: 1px solid #45475a; margin: 16px 0; }
-  .settings-section input[readonly] { opacity: 0.85; }
-  .models { list-style: none; padding: 0; margin: 0; }
-  .models li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 10px; background: #313244; border-radius: 6px; margin-bottom: 4px; }
-  .mname { font-size: 13px; }
-  .ok { color: #a6e3a1; font-size: 13px; }
-  .badges { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-  .badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; background: #45475a; color: #cdd6f4; white-space: nowrap; }
-  .badge.ru { background: #313244; color: #f38ba8; border: 1px solid #f38ba8; font-weight: 600; }
-  .badge.ok { background: #1e2a1e; color: #a6e3a1; display: inline-flex; align-items: center; gap: 5px; }
-  .badge.ok .dot { width: 8px; height: 8px; border-radius: 50%; background: #a6e3a1; box-shadow: 0 0 6px #a6e3a1; }
 </style>

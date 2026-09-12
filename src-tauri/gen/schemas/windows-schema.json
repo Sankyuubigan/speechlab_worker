@@ -2475,6 +2475,324 @@
           "markdownDescription": "Denies the reveal_item_in_dir command without any pre-configured scope."
         },
         {
+          "description": "Default permissions for the speech plugin (CrispASR TTS/STT engine).\n#### This default permission set includes:\n\n- `allow-tts-speak`\n- `allow-tts-presets`\n- `allow-tts-capabilities`\n- `allow-tts-unload`\n- `allow-tts-save-wav`\n- `allow-tts-download-engine`\n- `allow-tts-download-model`\n- `allow-tts-engine-backends`\n- `allow-tts-list-models`\n- `allow-tts-list-voices`\n- `allow-tts-add-voice`\n- `allow-tts-delete-voice`\n- `allow-tts-update-voice`\n- `allow-tts-voice-avatar`\n- `allow-tts-voice-audio`\n- `allow-tts-voice-trimmed-audio`\n- `allow-tts-check-update`\n- `allow-tts-default-dirs`\n- `allow-tts-get-settings`\n- `allow-tts-save-settings`\n- `allow-stt-get-settings`\n- `allow-stt-save-settings`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-get-status`\n- `allow-stt-inject-text`",
+          "type": "string",
+          "const": "speech:default",
+          "markdownDescription": "Default permissions for the speech plugin (CrispASR TTS/STT engine).\n#### This default permission set includes:\n\n- `allow-tts-speak`\n- `allow-tts-presets`\n- `allow-tts-capabilities`\n- `allow-tts-unload`\n- `allow-tts-save-wav`\n- `allow-tts-download-engine`\n- `allow-tts-download-model`\n- `allow-tts-engine-backends`\n- `allow-tts-list-models`\n- `allow-tts-list-voices`\n- `allow-tts-add-voice`\n- `allow-tts-delete-voice`\n- `allow-tts-update-voice`\n- `allow-tts-voice-avatar`\n- `allow-tts-voice-audio`\n- `allow-tts-voice-trimmed-audio`\n- `allow-tts-check-update`\n- `allow-tts-default-dirs`\n- `allow-tts-get-settings`\n- `allow-tts-save-settings`\n- `allow-stt-get-settings`\n- `allow-stt-save-settings`\n- `allow-stt-start`\n- `allow-stt-stop`\n- `allow-stt-get-status`\n- `allow-stt-inject-text`"
+        },
+        {
+          "description": "Allow reading STT engine settings.",
+          "type": "string",
+          "const": "speech:allow-stt-get-settings",
+          "markdownDescription": "Allow reading STT engine settings."
+        },
+        {
+          "description": "Allow reading the STT engine status.",
+          "type": "string",
+          "const": "speech:allow-stt-get-status",
+          "markdownDescription": "Allow reading the STT engine status."
+        },
+        {
+          "description": "Allow injecting transcribed text into the currently focused window (clipboard + Ctrl+V).",
+          "type": "string",
+          "const": "speech:allow-stt-inject-text",
+          "markdownDescription": "Allow injecting transcribed text into the currently focused window (clipboard + Ctrl+V)."
+        },
+        {
+          "description": "Allow saving STT engine settings.",
+          "type": "string",
+          "const": "speech:allow-stt-save-settings",
+          "markdownDescription": "Allow saving STT engine settings."
+        },
+        {
+          "description": "Allow starting the STT engine (returns WebSocket port).",
+          "type": "string",
+          "const": "speech:allow-stt-start",
+          "markdownDescription": "Allow starting the STT engine (returns WebSocket port)."
+        },
+        {
+          "description": "Allow stopping the STT engine.",
+          "type": "string",
+          "const": "speech:allow-stt-stop",
+          "markdownDescription": "Allow stopping the STT engine."
+        },
+        {
+          "description": "Allow adding a new voice to the voice storage.",
+          "type": "string",
+          "const": "speech:allow-tts-add-voice",
+          "markdownDescription": "Allow adding a new voice to the voice storage."
+        },
+        {
+          "description": "Allow reading current TTS engine capabilities (e.g. language support).",
+          "type": "string",
+          "const": "speech:allow-tts-capabilities",
+          "markdownDescription": "Allow reading current TTS engine capabilities (e.g. language support)."
+        },
+        {
+          "description": "Allow checking the connected CrispASR engine version for updates.",
+          "type": "string",
+          "const": "speech:allow-tts-check-update",
+          "markdownDescription": "Allow checking the connected CrispASR engine version for updates."
+        },
+        {
+          "description": "Allow reading default engine/models directories.",
+          "type": "string",
+          "const": "speech:allow-tts-default-dirs",
+          "markdownDescription": "Allow reading default engine/models directories."
+        },
+        {
+          "description": "Allow deleting a voice from the voice storage.",
+          "type": "string",
+          "const": "speech:allow-tts-delete-voice",
+          "markdownDescription": "Allow deleting a voice from the voice storage."
+        },
+        {
+          "description": "Allow downloading the CrispASR engine binary.",
+          "type": "string",
+          "const": "speech:allow-tts-download-engine",
+          "markdownDescription": "Allow downloading the CrispASR engine binary."
+        },
+        {
+          "description": "Allow downloading TTS model GGUF files.",
+          "type": "string",
+          "const": "speech:allow-tts-download-model",
+          "markdownDescription": "Allow downloading TTS model GGUF files."
+        },
+        {
+          "description": "Allow listing available engine backends (cpu/cuda/vulkan...).",
+          "type": "string",
+          "const": "speech:allow-tts-engine-backends",
+          "markdownDescription": "Allow listing available engine backends (cpu/cuda/vulkan...)."
+        },
+        {
+          "description": "Allow reading TTS settings.",
+          "type": "string",
+          "const": "speech:allow-tts-get-settings",
+          "markdownDescription": "Allow reading TTS settings."
+        },
+        {
+          "description": "Allow listing installed TTS models.",
+          "type": "string",
+          "const": "speech:allow-tts-list-models",
+          "markdownDescription": "Allow listing installed TTS models."
+        },
+        {
+          "description": "Allow listing saved voices from the voice storage.",
+          "type": "string",
+          "const": "speech:allow-tts-list-voices",
+          "markdownDescription": "Allow listing saved voices from the voice storage."
+        },
+        {
+          "description": "Allow listing available TTS model presets.",
+          "type": "string",
+          "const": "speech:allow-tts-presets",
+          "markdownDescription": "Allow listing available TTS model presets."
+        },
+        {
+          "description": "Allow saving TTS settings.",
+          "type": "string",
+          "const": "speech:allow-tts-save-settings",
+          "markdownDescription": "Allow saving TTS settings."
+        },
+        {
+          "description": "Allow saving synthesized WAV bytes to a user-chosen path.",
+          "type": "string",
+          "const": "speech:allow-tts-save-wav",
+          "markdownDescription": "Allow saving synthesized WAV bytes to a user-chosen path."
+        },
+        {
+          "description": "Allow text-to-speech synthesis via the CrispASR engine (returns WAV bytes).",
+          "type": "string",
+          "const": "speech:allow-tts-speak",
+          "markdownDescription": "Allow text-to-speech synthesis via the CrispASR engine (returns WAV bytes)."
+        },
+        {
+          "description": "Allow unloading the TTS engine (frees VRAM).",
+          "type": "string",
+          "const": "speech:allow-tts-unload",
+          "markdownDescription": "Allow unloading the TTS engine (frees VRAM)."
+        },
+        {
+          "description": "Allow updating an existing voice in the voice storage.",
+          "type": "string",
+          "const": "speech:allow-tts-update-voice",
+          "markdownDescription": "Allow updating an existing voice in the voice storage."
+        },
+        {
+          "description": "Allow reading a stored voice audio file.",
+          "type": "string",
+          "const": "speech:allow-tts-voice-audio",
+          "markdownDescription": "Allow reading a stored voice audio file."
+        },
+        {
+          "description": "Allow reading a voice avatar image.",
+          "type": "string",
+          "const": "speech:allow-tts-voice-avatar",
+          "markdownDescription": "Allow reading a voice avatar image."
+        },
+        {
+          "description": "Allow reading a trimmed clone reference audio.",
+          "type": "string",
+          "const": "speech:allow-tts-voice-trimmed-audio",
+          "markdownDescription": "Allow reading a trimmed clone reference audio."
+        },
+        {
+          "description": "Denies the stt_get_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-stt-get-settings",
+          "markdownDescription": "Denies the stt_get_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_get_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-stt-get-status",
+          "markdownDescription": "Denies the stt_get_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_inject_text command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-stt-inject-text",
+          "markdownDescription": "Denies the stt_inject_text command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_save_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-stt-save-settings",
+          "markdownDescription": "Denies the stt_save_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_start command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-stt-start",
+          "markdownDescription": "Denies the stt_start command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stt_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-stt-stop",
+          "markdownDescription": "Denies the stt_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_add_voice command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-add-voice",
+          "markdownDescription": "Denies the tts_add_voice command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_capabilities command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-capabilities",
+          "markdownDescription": "Denies the tts_capabilities command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_check_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-check-update",
+          "markdownDescription": "Denies the tts_check_update command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_default_dirs command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-default-dirs",
+          "markdownDescription": "Denies the tts_default_dirs command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_delete_voice command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-delete-voice",
+          "markdownDescription": "Denies the tts_delete_voice command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_download_engine command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-download-engine",
+          "markdownDescription": "Denies the tts_download_engine command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_download_model command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-download-model",
+          "markdownDescription": "Denies the tts_download_model command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_engine_backends command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-engine-backends",
+          "markdownDescription": "Denies the tts_engine_backends command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_get_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-get-settings",
+          "markdownDescription": "Denies the tts_get_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_list_models command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-list-models",
+          "markdownDescription": "Denies the tts_list_models command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_list_voices command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-list-voices",
+          "markdownDescription": "Denies the tts_list_voices command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_presets command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-presets",
+          "markdownDescription": "Denies the tts_presets command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_save_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-save-settings",
+          "markdownDescription": "Denies the tts_save_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_save_wav command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-save-wav",
+          "markdownDescription": "Denies the tts_save_wav command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_speak command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-speak",
+          "markdownDescription": "Denies the tts_speak command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_unload command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-unload",
+          "markdownDescription": "Denies the tts_unload command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_update_voice command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-update-voice",
+          "markdownDescription": "Denies the tts_update_voice command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_voice_audio command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-voice-audio",
+          "markdownDescription": "Denies the tts_voice_audio command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_voice_avatar command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-voice-avatar",
+          "markdownDescription": "Denies the tts_voice_avatar command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the tts_voice_trimmed_audio command without any pre-configured scope.",
+          "type": "string",
+          "const": "speech:deny-tts-voice-trimmed-audio",
+          "markdownDescription": "Denies the tts_voice_trimmed_audio command without any pre-configured scope."
+        },
+        {
           "description": "This permission set configures which kind of\nupdater functions are exposed to the frontend.\n\n#### Granted Permissions\n\nThe full workflow from checking for updates to installing them\nis enabled.\n\n\n#### This default permission set includes:\n\n- `allow-check`\n- `allow-download`\n- `allow-install`\n- `allow-download-and-install`",
           "type": "string",
           "const": "updater:default",

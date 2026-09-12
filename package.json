@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "vite --port 1420 --strictPort",
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "2.0.0",
-    "@tauri-apps/plugin-dialog": "2.0.0"
+    "@tauri-apps/plugin-dialog": "2.0.0",
+    "@my-tauri-plugins/plugin-speech": "file:../my-tauri-plugins/tauri-plugin-speech"
   }
 }
