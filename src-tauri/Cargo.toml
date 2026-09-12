@@ -48,6 +48,8 @@ windows = { version = "0.58", features = [
 
 # Логи: локальное время в метках таймингов (core rules §2.5.1)
 chrono = "0.4"
+# Логи: единый кастомный log::Log логгер (stderr + UI + last_logs) — core rules §2.5
+log = { version = "0.4", features = ["std"] }
 
 # Профиль release — единый источник правды (rules.md §2. ЗАПРЕЩЕНО дублировать
 # через CARGO_PROFILE_RELEASE_* в .bat-скриптах).

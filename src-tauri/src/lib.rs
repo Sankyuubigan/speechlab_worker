@@ -306,6 +306,11 @@ async fn stt_inject_text(text: String) -> Result<(), String> {
     modules::stt::inject::inject_text(&text)
 }
 
+#[tauri::command]
+fn log_last_logs_path() -> String {
+    crate::modules::log::last_logs_path().to_string_lossy().to_string()
+}
+
 // ─── Main entry ──────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -315,7 +320,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_speech::init())
-        .setup(|_app| {
+        .setup(|app| {
+            crate::modules::log::install(app.handle().clone());
             crate::modules::log::truncate_last_logs();
             // Зачистка зомби от предыдущих крашей (rules.md §6.5).
             crate::modules::process_util::kill_active_engines();
@@ -339,6 +345,7 @@ pub fn run() {
             stt_stop,
             stt_get_status,
             stt_inject_text,
+            log_last_logs_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

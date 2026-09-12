@@ -57,6 +57,7 @@
 
   let draggedIdx = $state<number | null>(null);
   let logs = $state<string[]>([]);
+  let lastLogsPath = $state('');
 
   // --- STT (voice input) state ---
   let sttStatus = $state('stopped'); // stopped, starting, listening, recording, transcribing, error
@@ -105,6 +106,10 @@
     } catch { ttsVoices = []; }
   }
 
+  $effect(() => {
+    if (activeTab === 'tts') refreshVoices();
+  });
+
   async function refreshEngineStatus() {
     try {
       engineStatus = await invoke('plugin:speech|tts_check_update');
@@ -137,6 +142,10 @@
     const unlistenCaps = listen<{ language: boolean }>('tts-caps', (event) => {
       ttsCaps = event.payload;
     });
+
+    invoke<string>('log_last_logs_path')
+      .then((p) => { lastLogsPath = p; })
+      .catch(() => {});
 
     invoke<{ id: string; label: string; backend: string; has_codec: boolean; has_voice: boolean; voice_type: string; builtin_voices: string[]; supports_instruct: boolean; supports_russian: boolean; size: string }[]>('plugin:speech|tts_presets')
       .then((p) => { ttsPresets = p; })
@@ -875,6 +884,9 @@
 
   {:else}
     <section class="logs-section">
+      <p class="hint" style="margin:0 0 8px;">
+        Файл last_logs: <code>{lastLogsPath || '…'}</code>
+      </p>
       <div class="row">
         <button onclick={copyLogs}>Копировать логи</button>
         <button onclick={() => logs = []}>Очистить</button>
@@ -954,6 +966,7 @@
   .status { opacity: 0.8; font-size: 14px; margin-left: 8px; }
   .hint { opacity: 0.65; font-size: 13px; margin: 4px 0 10px; }
   .hint.warn { color: #f9e2af; }
+  code { background: #313244; padding: 1px 6px; border-radius: 4px; word-break: break-all; color: #cdd6f4; }
 
   .progress-wrap { height: 6px; background: #313244; border-radius: 4px; margin: 15px 0 20px; overflow: hidden; width: 100%; }
   .progress-bar { height: 100%; background: #89b4fa; transition: width 0.3s ease; }
