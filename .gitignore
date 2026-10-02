@@ -37,6 +37,4 @@ dist-ssr
 /package-lock.json
 /tasks
 /test
-# артефакты ошибочных редиректов оболочки (фантомные файлы, ждут перезагрузки)
-{
-'ERR
+/src-tauri/redist/

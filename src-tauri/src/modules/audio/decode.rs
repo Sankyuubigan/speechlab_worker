@@ -115,15 +115,26 @@ pub fn decode_file(path: &str) -> Result<(usize, u32, Vec<f32>)> {
 mod tests {
     use super::*;
 
+    /// Декод РЕАЛЬНОГО ogg с внешнего диска. Путь берётся из переменной
+    /// окружения `SPEECHLAB_TEST_OGG`, а не зашит в код (core rules §1.4).
+    ///
+    /// Тест `#[ignore]`: фикстура лежит вне репозитория (core rules §2.9), и
+    /// он не должен «проходить» молча при её отсутствии — раньше здесь стоял
+    /// тихий `return`, из-за чего ogg_decode всегда был зелёным, ничего не
+    /// декодируя (core rules §2.2 — ложь в тестах).
+    ///
+    /// Запуск: `run_asr_test.bat` (сам подставит переменную окружения).
     #[test]
+    #[ignore = "нужен реальный ogg: задай SPEECHLAB_TEST_OGG"]
     fn ogg_decode() {
-        // Реальный тестовый файл из Загрузок
-        let path = "E:\\Downloads\\audio_2026-07-18_23-59-01.ogg";
-        if !std::path::Path::new(path).exists() {
-            eprintln!("⚠️ тестовый файл не найден: {path} — пропускаем");
-            return;
+        let path = match std::env::var("SPEECHLAB_TEST_OGG") {
+            Ok(p) => p,
+            Err(_) => panic!("SPEECHLAB_TEST_OGG не задан — этот тест нельзя молча пропускать"),
+        };
+        if !std::path::Path::new(&path).exists() {
+            panic!("тестовый ogg не найден по пути из SPEECHLAB_TEST_OGG: {path}");
         }
-        let (channels, rate, samples) = decode_file(path).expect("декод должен успешно пройти");
+        let (channels, rate, samples) = decode_file(&path).expect("декод должен успешно пройти");
         println!("decoded: channels={channels}, rate={rate}, samples={}", samples.len());
         assert!(channels >= 1, "каналов должно быть >= 1");
         assert!(rate > 0, "sample_rate должен быть > 0");

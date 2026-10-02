@@ -1,33 +1,59 @@
 @echo off
-REM Switch console to UTF-8
-chcp 65001 >nul
-cd /d "%~dp0"
+setlocal enableextensions
 
-REM Auto-detect and initialize MSVC
-for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -legacy -property installationPath 2^>nul`) do (
-    if exist "%%i\VC\Auxiliary\Build\vcvarsall.bat" (
-        call "%%i\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
-    )
+set "PROJ=%~dp0"
+if not exist "%PROJ%src-tauri\tauri.conf.json" (
+  echo [ERROR] This script must live in the project root, next to src-tauri\tauri.conf.json
+  pause
+  exit /b 1
 )
 
-REM Remove sccache wrappers that break cc-rs
-set "CC=cl"
-set "CXX=cl"
+set "TOOLKIT=%TAURI_BUILD_TOOLKIT%"
+if "%TOOLKIT%"=="" set "TOOLKIT=%~dp0..\my-tauri-plugins\tauri-build-toolkit\cli.cjs"
+if not exist "%TOOLKIT%" (
+  echo [ERROR] Tauri build toolkit not found: "%TOOLKIT%"
+  echo Set env TAURI_BUILD_TOOLKIT to the toolkit cli.cjs, or place the
+  echo toolkit folder at: my-tauri-plugins\tauri-build-toolkit
+  pause
+  exit /b 1
+)
+
+set "VS_INIT_OK="
+for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath 2^>nul`) do (
+    if exist "%%i\VC\Auxiliary\Build\vcvarsall.bat" (
+        call "%%i\VC\Auxiliary\Build\vcvarsall.bat" x64 >nul 2>&1
+        set "VS_INIT_OK=1"
+    )
+)
+if not defined VS_INIT_OK (
+  echo [ERROR] Visual Studio not found. vswhere. Install VS with C++ workload.
+  pause
+  exit /b 1
+)
+
+set "CC="
+set "CXX="
 set "CMAKE_C_COMPILER_LAUNCHER="
 set "CMAKE_CXX_COMPILER_LAUNCHER="
 set "RUSTC_WRAPPER="
 set "CARGO_BUILD_RUSTC_WRAPPER="
-set "CMAKE_POLICY_VERSION_MINIMUM=3.5"
 
-REM NOTE: профиль release (LTO/codegen-units/strip) задан ТОЛЬКО в Cargo.toml
-REM (rules.md §2) — здесь НЕ задаём CARGO_PROFILE_RELEASE_*.
+set "CARGO_PROFILE_RELEASE_LTO="
+set "CARGO_PROFILE_RELEASE_CODEGEN_UNITS="
+set "CARGO_PROFILE_RELEASE_STRIP="
 
-node release.cjs
-if %ERRORLEVEL% NEQ 0 (
-    echo.
-    echo ========================================
-    echo   RELEASE ERROR! Press any key to exit...
-    echo ========================================
-    pause >nul
-    exit /b 1
+echo [WARNING] release.bat will build, sign, publish a GitHub release, bump version,
+echo           regenerate latest.json and commit/push version files. Run only from a
+echo           clean target branch.
+
+node "%TOOLKIT%" release --project "%PROJ%"
+if errorlevel 1 (
+  echo [ERROR] Release failed.
+  pause
+  exit /b 1
 )
+
+echo [+DONE] release.bat finished.
+echo.
+pause
+endlocal

@@ -444,7 +444,9 @@
     });
     if (!path) return;
     try {
-      await invoke('plugin:speech|tts_save_wav', { path, data: Array.from(lastTtsWav) });
+      // Uint8Array уходит по IPC сырым буфером (structuredClone), а Array.from
+      // превращал бы миллион байт WAV в массив из миллиона double — лишние ~10 МБ.
+      await invoke('plugin:speech|tts_save_mp3', { path, data: lastTtsWav });
       ttsStatus = 'MP3 сохранён: ' + path;
     } catch (e) {
       ttsStatus = 'ошибка сохранения: ' + String(e);

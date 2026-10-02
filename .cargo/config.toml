@@ -1,0 +1,18 @@
+# Настройки cargo для Tauri-проекта SpeechLab.
+#
+# Файл в корне репозитория (НЕ в src-tauri/) — cargo ищет конфиг вверх от
+# текущего каталога, поэтому он действует и для запуска из корня, и из
+# src-tauri (куда запускает cargo tauri-build-toolkit). Одно место — один
+# источник правды (core rules §2.1).
+#
+# CMAKE_POLICY_VERSION_MINIMUM: крейт `opus` (audiopus_sys) собирает libopus
+# через CMake, а в её CMakeLists.txt стоит `cmake_minimum_required(VERSION 3.5)`.
+# CMake 4.x удалил совместимость с <3.5 и без этой переменной падает с
+# "Compatibility with CMake < 3.5 has been removed". Переменная нужна и
+# старому build.bat, и шаблонам tauri-build-toolkit — здесь она задана один раз
+# на уровне проекта.
+#
+# Это НЕ обход бага: зависимость работает корректно, CMake просто требует
+# явного подтверждения политики версии.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
