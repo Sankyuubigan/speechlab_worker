@@ -1,6 +1,5 @@
 pub mod hotkey;
 pub mod inject;
-pub mod mic;
 pub mod tray;
 pub mod ws_client;
 

@@ -1,4 +1,5 @@
 pub mod decode;
+pub mod mic;
 pub mod opus_decode;
 
 use anyhow::Result;

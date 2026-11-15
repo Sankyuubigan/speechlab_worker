@@ -4,8 +4,9 @@
   import { listen } from '@tauri-apps/api/event';
   import { open, save } from '@tauri-apps/plugin-dialog';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
+  import DialogueTab from './lib/DialogueTab.svelte';
 
-  let activeTab = $state<'main' | 'tts' | 'stt' | 'settings' | 'logs'>('main');
+  let activeTab = $state<'main' | 'tts' | 'stt' | 'dialog' | 'settings' | 'logs'>('main');
   let modelDir = $state('D:\\nn\\models\\stt\\gigaam-v3');
   let dropFiles = $state<string[]>([]);
   let status = $state('');
@@ -591,6 +592,7 @@
     <button class:active={activeTab === 'main'} onclick={() => activeTab = 'main'}>Распознавание</button>
     <button class:active={activeTab === 'tts'} onclick={() => activeTab = 'tts'}>ТТС</button>
     <button class:active={activeTab === 'stt'} onclick={() => activeTab = 'stt'}>Голосовой ввод</button>
+    <button class:active={activeTab === 'dialog'} onclick={() => activeTab = 'dialog'}>Диалог</button>
     <button class:active={activeTab === 'settings'} onclick={() => activeTab = 'settings'}>⚙ Настройки</button>
     <button class:active={activeTab === 'logs'} onclick={() => activeTab = 'logs'}>Логи ({logs.length})</button>
   </div>
@@ -863,6 +865,9 @@
         </div>
       {/if}
     </section>
+
+  {:else if activeTab === 'dialog'}
+    <DialogueTab />
 
   {:else if activeTab === 'settings'}
     <section class="settings-section" aria-label="Настройки">

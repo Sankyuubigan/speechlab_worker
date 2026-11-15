@@ -18,6 +18,8 @@ pub struct AppState {
     /// When true, HotkeyListener emits ALL key events (not just the configured hotkey).
     /// Used for hotkey assignment: user sees every keypress in real time.
     pub stt_capture_all: Arc<AtomicBool>,
+    /// Активная сессия диалога Haru (ручка остановки). None — сессии нет.
+    pub dialog: Mutex<Option<modules::dialog::session::DialogSessionHandle>>,
 }
 
 fn emit_log(app: &AppHandle, msg: &str) {
@@ -215,7 +217,7 @@ async fn stt_start(
                         // cpal::Stream is !Send, so we use std::thread::spawn instead of tokio::spawn.
                         // Communication with mic thread is via channels.
                         std::thread::spawn(move || {
-                            let mut mic = match modules::stt::mic::MicCapture::new() {
+                            let mut mic = match modules::audio::mic::MicCapture::new() {
                                 Ok(m) => m,
                                 Err(e) => { modules::stt::tray::emit_status(&app_rec, &modules::stt::SttStatus::Error(e)); return; }
                             };
@@ -306,6 +308,69 @@ async fn stt_inject_text(text: String) -> Result<(), String> {
     modules::stt::inject::inject_text(&text)
 }
 
+// ─── Dialog: full-duplex разговор с Haru (speech.cpp) ─────────────────
+//
+// Движковая часть (spawn/stop/health процесса `speech serve`) — в плагине
+// `tauri-plugin-speech` (`PluginState.dialog`). Оверлей сессии — здесь:
+// WS `/v1/dialogue`, микрофон, воспроизведение, события во фронт.
+
+#[tauri::command]
+async fn dialog_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<u16, String> {
+    let settings = tauri_plugin_speech::DialogSettings::load();
+    // Процесс движка (переиспользуется, если уже запущен с тем же назначением).
+    let ws_port = app
+        .state::<tauri_plugin_speech::PluginState>()
+        .dialog
+        .ensure(&app, &settings)
+        .await?;
+
+    // Сессия уже идёт — вторую не плодим (один разговор на сервер).
+    if state.dialog.lock().await.is_some() {
+        return Ok(ws_port);
+    }
+
+    let handle = modules::dialog::session::start_dialog(app.clone(), ws_port, settings)?;
+    *state.dialog.lock().await = Some(handle);
+    Ok(ws_port)
+}
+
+#[tauri::command]
+async fn dialog_stop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // 1. Вежливое завершение сессии: hang_up + ожидание end.
+    if let Some(handle) = state.dialog.lock().await.take() {
+        handle.stop();
+        // Даём потоку сессии время на hang_up/drain, прежде чем убить сервер.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    // 2. Остановка процесса движка (JobGuard + kill tree).
+    app.state::<tauri_plugin_speech::PluginState>()
+        .dialog
+        .stop(&app)
+        .await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn dialog_get_status(app: AppHandle) -> Result<String, String> {
+    Ok(match app
+        .state::<tauri_plugin_speech::PluginState>()
+        .dialog
+        .status()
+    {
+        tauri_plugin_speech::DialogStatus::Stopped => "stopped",
+        tauri_plugin_speech::DialogStatus::Starting => "starting",
+        tauri_plugin_speech::DialogStatus::Ready => "ready",
+        tauri_plugin_speech::DialogStatus::Error(_) => "error",
+    }
+    .to_string())
+}
+
 #[tauri::command]
 fn log_last_logs_path() -> String {
     crate::modules::log::last_logs_path().to_string_lossy().to_string()
@@ -333,6 +398,7 @@ pub fn run() {
             cancel: Arc::new(AtomicBool::new(false)),
             stt_tx: Mutex::new(None),
             stt_capture_all: Arc::new(AtomicBool::new(false)),
+            dialog: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             set_model_dir,
@@ -345,6 +411,9 @@ pub fn run() {
             stt_stop,
             stt_get_status,
             stt_inject_text,
+            dialog_start,
+            dialog_stop,
+            dialog_get_status,
             log_last_logs_path,
         ])
         .build(tauri::generate_context!())
