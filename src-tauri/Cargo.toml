@@ -32,7 +32,7 @@ ort = "2.0.0-rc.12"
 ndarray = "0.17"
 
 # CrispASR engine (TTS/STT) как отдельный prebuilt-процесс + HTTP — см. tauri-plugin-speech
-tauri-plugin-speech = { path = "../../my-tauri-plugins/tauri-plugin-speech" }
+tauri-plugin-speech = { path = "../../cross-app-plugins/tauri-plugin-speech" }
 
 # STT: system-wide voice input (push-to-talk)
 rdev = "0.5"                               # global hotkey listener

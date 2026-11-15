@@ -23,6 +23,6 @@
   "dependencies": {
     "@tauri-apps/api": "2.0.0",
     "@tauri-apps/plugin-dialog": "2.0.0",
-    "@my-tauri-plugins/plugin-speech": "file:../my-tauri-plugins/tauri-plugin-speech"
+    "@my-tauri-plugins/plugin-speech": "file:../cross-app-plugins/tauri-plugin-speech"
   }
 }
